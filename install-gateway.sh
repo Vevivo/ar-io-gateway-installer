@@ -15,7 +15,7 @@ cat <<'EOF'
 ███    ████  ██████████    ███████  ███████    ████  ████  █
 ████  █████        █████  █████        █████  ██████      ██
 
-Welcome to the First Permanent Cloud Network
+                    Powered by AR.IO
 EOF
 
 echo
