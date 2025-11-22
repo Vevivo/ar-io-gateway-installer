@@ -15,7 +15,7 @@ cat <<'EOF'
 ███    ████  ██████████    ███████  ███████    ████  ████  █
 ████  █████        █████  █████        █████  ██████      ██
 
-                    Powered by ar.io
+Welcome to the First Permanent Cloud Network
 EOF
 
 echo
@@ -67,6 +67,14 @@ if [[ -z "${REPORT_DATA_SINK}" ]]; then
   REPORT_DATA_SINK="arweave"
 fi
 echo "REPORT_DATA_SINK set to: ${REPORT_DATA_SINK}"
+
+echo
+read -rp "Enter email address for Certbot (Let's Encrypt notifications): " CERTBOT_EMAIL
+if [[ -z "${CERTBOT_EMAIL}" ]]; then
+  echo "Email cannot be empty for Certbot registration." >&2
+  exit 1
+fi
+echo "Certbot email set to: ${CERTBOT_EMAIL}"
 
 echo
 echo "[1b/7] Observer wallet keyfile"
@@ -216,6 +224,9 @@ systemctl stop nginx || true
 certbot certonly \
   --manual \
   --preferred-challenges dns \
+  --agree-tos \
+  --no-eff-email \
+  -m "${CERTBOT_EMAIL}" \
   -d "${DOMAIN}" \
   -d "*.${DOMAIN}"
 
@@ -307,7 +318,7 @@ echo "  Host : _acme-challenge"
 echo "  Value: <token provided by Certbot>"
 echo
 systemctl stop nginx || true
-certbot certonly --manual --preferred-challenges dns -d ${DOMAIN} -d *.${DOMAIN}
+certbot certonly --manual --preferred-challenges dns --agree-tos --no-eff-email -m "${CERTBOT_EMAIL}" -d ${DOMAIN} -d *.${DOMAIN}
 nginx -t && systemctl restart nginx
 cd ${INSTALL_DIR} || exit 1
 docker compose restart
