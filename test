@@ -1,120 +1,137 @@
-# AR.IO Gateway Installer
+AR.IO Gateway Installer
 
-**AR.IO Gateway** kurulumunu hızlı, güvenli ve otomatik hale getiren kapsamlı bir kurulum sihirbazıdır.  
-Ubuntu 22.04 LTS üzerinde **tek komutla** çalışan, domain, SSL, observer config ve gateway yapılandırmasını tamamen otomatik olarak yapar.
+Bu repo, AR.IO ağında kendi gateway’inizi hızlı, temiz ve otomatik şekilde kurmanız için hazırladığım kurulum aracını içerir.
+Tüm işlemler Ubuntu 22.04 LTS üzerinde test edilmiştir.
 
-## Requirements
+Ön Gereksinimler
 
-### System Requirements
-- Ubuntu **22.04 LTS**
-- Minimum **2 vCPU**
-- Minimum **4 GB RAM**
-- Minimum **60 GB SSD**
+Aşağıdaki bileşenlere sahip olmanız gerekir:
 
-### Wallet & Token Requirements
-- **Arweave (AR) wallet**: https://www.wander.app/
-- Cüzdanda **en az 2 AR** bulundurulması önerilir.
-- Gateway için **10,000 ARIO** gereklidir (Gate.io / Biconomy üzerinden alıp Wander cüzdanına transfer edebilirsiniz).
+1) Arweave Cüzdanı
 
-## DNS Configuration
+Arweave cüzdanınızı buradan oluşturabilirsiniz:
 
-### A Record
-| Type | Host | Value |
-|------|------|--------|
-| A | @ | Sunucu IP’niz |
-| A | * | Sunucu IP’niz |
+https://www.wander.app
 
-## Installation
+2) ARIO Token
 
-```bash
-wget -q https://raw.githubusercontent.com/Vevivo/ar-io-gateway-installer/main/install-gateway.sh -O install-gateway.sh && bash install-gateway.sh
-```
+Gateway çalıştırmak için en az 10,000 ARIO stakeliyorsunuz.
+ARIO tokenini şu borsalardan alabilirsiniz:
 
-## Setup Flow
+Gate.io
 
-### 1) Domain Name
-Kurulum sizden domain ister.
+Biconomy
 
-### 2) Gateway Hostname
-gateway.domain.com formatında girilir.
+Daha sonra tokeni Wander cüzdanınıza transfer edebilirsiniz.
 
-### 3) Arweave Observer Keyfile
-JSON içeriği **tırnaklarıyla birlikte** yapıştırmalısınız:
+3) Minimum Sistem Gereksinimi
+Kaynak	Minimum	Önerilen
+CPU	4 Core	12 Core
+RAM	4 GB	32 GB
+Depolama	500 GB SSD	2 TB SSD
+İnternet	50 Mbps	1 Gbps
+Dosya Sistemi	ext4	ext4
+1. DNS Ayarları (Domain Hazırlığı)
 
-```json
-{
-  "kty": "RSA",
-  "e": "AQAB",
-  "n": "..."
-}
-```
+Gateway çalışması için domain gereklidir.
 
-### 4) SSL TXT Record
-Certbot aşağıdaki gibi bir TXT kaydı isteyecektir:
+A Rekoru
 
-| Host | Value |
-|------|--------|
-| _acme-challenge | <kopyalanacak kod> |
+Domain panelinizde aşağıdaki şekilde A kaydı ekleyin:
 
-- Kayıt ekleyin  
-- **30–60 saniye bekleyin**  
-- Gerekirse ikinci TXT için tekrar ekleme yapın  
+Host	Value
+@	Sunucu_IP_adresiniz
+*	Sunucu_IP_adresiniz
 
-## Post-Installation Commands
+A kayıtları aktif olduktan sonra kurulum yapılabilir.
 
-```bash
+2. Gateway Kurulumu
+
+Sunucuda aşağıdaki komutu çalıştırın:
+
+wget -O install-gateway.sh https://raw.githubusercontent.com/Vevivo/ar-io-gateway-installer/main/install-gateway.sh && bash install-gateway.sh
+
+
+Kurulum boyunca sizden şu bilgiler istenir:
+
+Domain adı
+
+Arweave Cüzdan Adresi
+
+Cüzdan JSON keyfile (tırnaklar dahil tamamını yapıştırın)
+
+Observer cüzdanı (ayrı veya aynı olabilir)
+
+AO_CU_URL (boş geçilir ise: https://cu.ardrive.io
+)
+
+REPORT_DATA_SINK (boş geçilir ise: arweave)
+
+3. SSL TXT Kayıtları (WildCard Sertifika)
+
+Certbot otomatik olarak 1 veya 2 adet TXT kaydı talep eder.
+
+Aşağıdaki örnekte olduğu gibi:
+
+Host	Value
+_acme-challenge	<kopyalanacak_kod>
+Yapmanız gereken:
+
+Bu TXT kaydını DNS panelinize ekleyin
+
+30–60 saniye bekleyin
+
+Terminalde ENTER tuşuna basın
+
+Eğer ikinci TXT kaydı isterse, aynı işlemi tekrarlayın
+
+Certbot bitene kadar TXT kayıtlarını silmeyin
+
+SSL tamamlandıktan sonra kurulum otomatik ilerler.
+
+4. Kurulum Sonrası Kullanışlı Komutlar
+Gateway’i güncellemek için
 gateway-update
-```
 
-```bash
+Gateway’i yeniden başlatmak için
 gateway-restart
-```
 
-```bash
+Logları izlemek için (core + observer)
 gateway-logs
-```
 
-```bash
+SSL sertifikasını yenilemek için
 gateway-renew-cert
-```
 
-## File Structure
+5. Dosya Yapısı
 
-```
+Kurulum sonunda gateway dizini:
+
 /opt/ar-io-gateway/
-   ├── docker-compose.yml
-   ├── .env
-   ├── wallets/
-   └── logs/
-```
+├── docker-compose.yml
+├── .env
+├── nginx/
+│   └── default
+├── wallets/
+│   └── <observer_wallet>.json
+└── logs/
 
-## Editing .env File
+6. ENV Dosyasını Manuel Düzenlemek
 
-```bash
+ENV dosyasına erişmek için:
+
 cd /opt/ar-io-gateway
 nano .env
-```
 
-Kayıt için:
-- CTRL + O  
-- ENTER  
-- CTRL + X
 
-## Service Status
+Değişiklikten sonra:
 
-```bash
-docker compose ps
-```
+gateway-restart
 
-Observer logları:
+7. Powered by ar.io
 
-```bash
-docker compose logs observer -f
-```
+Bu kurulum aracı Powered by AR.IO yaklaşımıyla hazırlanmıştır.
+Permaweb üzerinde kalıcı ve performanslı gateway’lerin çoğalması için geliştirildi.
 
-Core logları:
+8. Destek
 
-```bash
-docker compose logs core -f
-```
-
+Herhangi bir sorun için AR.IO Discord topluluğuna katılabilirsiniz.
