@@ -293,14 +293,22 @@ echo "Creating helper commands under /usr/local/bin ..."
 cat >/usr/local/bin/gateway-update <<EOF
 #!/usr/bin/env bash
 cd ${INSTALL_DIR} || exit 1
-docker compose pull
+
+# Update repo
+git pull
+
+# Recreate containers with fresh volumes
+docker compose down -v
 docker compose up -d
 EOF
 
 cat >/usr/local/bin/gateway-restart <<EOF
 #!/usr/bin/env bash
 cd ${INSTALL_DIR} || exit 1
-docker compose restart
+
+# Full restart (no volume delete)
+docker compose down
+docker compose up -d
 EOF
 
 cat >/usr/local/bin/gateway-logs <<EOF
@@ -320,8 +328,10 @@ echo
 systemctl stop nginx || true
 certbot certonly --manual --preferred-challenges dns --agree-tos --no-eff-email -m "${CERTBOT_EMAIL}" -d ${DOMAIN} -d *.${DOMAIN}
 nginx -t && systemctl restart nginx
+
 cd ${INSTALL_DIR} || exit 1
-docker compose restart
+docker compose down
+docker compose up -d
 EOF
 
 chmod +x /usr/local/bin/gateway-update
@@ -342,3 +352,4 @@ echo "  gateway-logs        → View core + observer logs"
 echo "  gateway-renew-cert  → Renew SSL certificate (manual DNS, then restart)"
 echo
 echo "Welcome to the First Permanent Cloud Network."
+
