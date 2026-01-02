@@ -106,7 +106,13 @@ START_HEIGHT=1790000
 ###############################################################################
 echo
 echo -e "${YELLOW}[2/7] Installing base packages (including jq)...${NC}"
-apt update -y
+
+# APT Listelerini temizle (404 hatasını önlemek için kritik adım)
+echo "Cleaning apt lists to fix potential 404 errors..."
+rm -rf /var/lib/apt/lists/*
+apt-get clean
+apt-get update -y
+
 apt upgrade -y
 # 'jq' paketini ekledim, JSON çıktılarını okunaklı görmek için
 apt install -y curl openssh-server git certbot nginx sqlite3 build-essential ca-certificates software-properties-common jq
@@ -115,11 +121,16 @@ systemctl enable ssh
 echo
 echo -e "${YELLOW}[2b/7] Checking Docker...${NC}"
 if ! command -v docker >/dev/null 2>&1; then
-  echo "Installing Docker using official script..."
-  # GÜNCELLEME: Manuel repo yerine resmi script kullanımı (Hata önleyici)
+  echo "Installing Docker..."
+  
+  # Önceki hatalı kurulumları temizlemeye çalış
+  dpkg --configure -a || true
+  
+  # Resmi script ile kurulum
   curl -fsSL https://get.docker.com -o get-docker.sh
   sh get-docker.sh
   rm get-docker.sh
+  
   echo "Docker installed successfully."
 else
   echo "Docker is already installed."
