@@ -24,6 +24,7 @@ cat <<'EOF'
 
       Welcome to the First Permanent Cloud Network
         --- AR.IO Gateway Installer by Vevivo ---
+        (Optimized for Ubuntu 22.04 LTS)
 EOF
 
 echo
@@ -31,7 +32,7 @@ echo -e "${CYAN}This installer will set up an AR.IO gateway with:${NC}"
 echo "  - Docker services (core, envoy, observer, redis, autoheal)"
 echo "  - Let's Encrypt SSL via Certbot (wildcard, DNS challenge)"
 echo "  - Nginx reverse proxy"
-echo "  - Helper commands for easy management"
+echo "  - Helper commands (restart, update, status, check)"
 echo
 
 INSTALL_DIR="/opt/ar-io-gateway"
@@ -102,34 +103,43 @@ echo -e "${GREEN}Keyfile temporarily saved.${NC}"
 START_HEIGHT=1790000
 
 ###############################################################################
-# [2/7] SYSTEM PACKAGES, DOCKER, NODE, JQ
+# [2/7] SYSTEM PACKAGES & DOCKER (UBUNTU 22.04)
 ###############################################################################
 echo
-echo -e "${YELLOW}[2/7] Installing base packages (including jq)...${NC}"
+echo -e "${YELLOW}[2/7] Installing base packages (Ubuntu 22.04)...${NC}"
 
-# APT Listelerini temizle (404 hatasını önlemek için kritik adım)
-echo "Cleaning apt lists to fix potential 404 errors..."
+# 1. Hata önlemek için apt cache temizliği
 rm -rf /var/lib/apt/lists/*
 apt-get clean
 apt-get update -y
+apt-get upgrade -y
 
-apt upgrade -y
-# 'jq' paketini ekledim, JSON çıktılarını okunaklı görmek için
-apt install -y curl openssh-server git certbot nginx sqlite3 build-essential ca-certificates software-properties-common jq
+# 2. Gerekli araçlar (jq eklendi)
+apt-get install -y curl openssh-server git certbot nginx sqlite3 build-essential ca-certificates software-properties-common gnupg jq lsb-release
 systemctl enable ssh
 
 echo
 echo -e "${YELLOW}[2b/7] Checking Docker...${NC}"
+
 if ! command -v docker >/dev/null 2>&1; then
-  echo "Installing Docker..."
+  echo "Installing Docker (Official Repo Method)..."
   
-  # Önceki hatalı kurulumları temizlemeye çalış
-  dpkg --configure -a || true
+  # Klasör oluştur
+  mkdir -p /etc/apt/keyrings
   
-  # Resmi script ile kurulum
-  curl -fsSL https://get.docker.com -o get-docker.sh
-  sh get-docker.sh
-  rm get-docker.sh
+  # GPG Key indir (Varsa silip yeniden indir)
+  rm -f /etc/apt/keyrings/docker.asc
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | tee /etc/apt/keyrings/docker.asc > /dev/null
+  chmod a+r /etc/apt/keyrings/docker.asc
+
+  # Repoyu ekle
+  echo \
+    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+    $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+  
+  # Tekrar update et ve kur
+  apt-get update -y
+  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
   
   echo "Docker installed successfully."
 else
@@ -292,7 +302,7 @@ docker compose up -d --remove-orphans
 echo -e "${GREEN}Update complete!${NC}"
 EOF
 
-# 2. RESTART (FULL STOP & START)
+# 2. RESTART (FULL STOP & START - As Requested)
 cat >/usr/local/bin/gateway-restart <<EOF
 #!/usr/bin/env bash
 echo -e "${YELLOW}Stopping all services...${NC}"
@@ -333,7 +343,7 @@ docker compose up -d --force-recreate
 echo -e "${GREEN}SSL Renewed.${NC}"
 EOF
 
-# 6. HEALTH CHECK
+# 6. HEALTH CHECK (Otomatik Domain Algılama)
 cat >/usr/local/bin/gateway-check <<EOF
 #!/usr/bin/env bash
 # .env dosyasından domaini otomatik çeker
@@ -349,7 +359,6 @@ echo -e "${YELLOW}Testing API Endpoints for: https://\$DOMAIN${NC}"
 echo
 
 echo -e "${CYAN}>>> Checking Health (/ar-io/healthcheck):${NC}"
-# jq kullanarak çıktıyı renklendirir
 curl -s "https://\$DOMAIN/ar-io/healthcheck" | jq . || echo "Raw output: \$(curl -s "https://\$DOMAIN/ar-io/healthcheck")"
 echo
 
@@ -383,7 +392,7 @@ echo "Gateway URL     : https://${DOMAIN}"
 echo "------------------------------------------------------------------"
 echo -e "${CYAN}COMMAND LIST:${NC}"
 echo "  gateway-update   : Update node safely"
-echo "  gateway-restart  : Full Stop & Start"
+echo "  gateway-restart  : Full Stop & Start (Clean)"
 echo "  gateway-check    : Check Health & API Info"
 echo "  gateway-status   : Check Docker resources"
 echo "  gateway-logs     : View live logs"
