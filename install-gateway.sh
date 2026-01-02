@@ -102,13 +102,14 @@ echo -e "${GREEN}Keyfile temporarily saved.${NC}"
 START_HEIGHT=1790000
 
 ###############################################################################
-# [2/7] SYSTEM PACKAGES, DOCKER, NODE
+# [2/7] SYSTEM PACKAGES, DOCKER, NODE, JQ
 ###############################################################################
 echo
-echo -e "${YELLOW}[2/7] Installing base packages...${NC}"
+echo -e "${YELLOW}[2/7] Installing base packages (including jq)...${NC}"
 apt update -y
 apt upgrade -y
-apt install -y curl openssh-server git certbot nginx sqlite3 build-essential ca-certificates software-properties-common
+# 'jq' paketini ekledim, JSON çıktılarını okunaklı görmek için
+apt install -y curl openssh-server git certbot nginx sqlite3 build-essential ca-certificates software-properties-common jq
 systemctl enable ssh
 
 echo
@@ -268,12 +269,12 @@ docker compose down
 docker compose up -d
 
 ###############################################################################
-# HELPER COMMANDS (FIXED & IMPROVED)
+# HELPER COMMANDS
 ###############################################################################
 echo
 echo -e "${YELLOW}Creating helper commands...${NC}"
 
-# 1. UPDATE (SAFE: No -v flag)
+# 1. UPDATE
 cat >/usr/local/bin/gateway-update <<EOF
 #!/usr/bin/env bash
 echo -e "${YELLOW}Updating AR.IO Gateway...${NC}"
@@ -284,8 +285,7 @@ docker compose up -d --remove-orphans
 echo -e "${GREEN}Update complete!${NC}"
 EOF
 
-# 2. RESTART (FULL SHUTDOWN & START)
-# User request: Stop completely, then start again. (Safe: No -v flag)
+# 2. RESTART (FULL STOP & START)
 cat >/usr/local/bin/gateway-restart <<EOF
 #!/usr/bin/env bash
 echo -e "${YELLOW}Stopping all services...${NC}"
@@ -296,14 +296,14 @@ docker compose up -d
 echo -e "${GREEN}Gateway has been fully restarted!${NC}"
 EOF
 
-# 3. LOGS (BETTER UX)
+# 3. LOGS
 cat >/usr/local/bin/gateway-logs <<EOF
 #!/usr/bin/env bash
 cd ${INSTALL_DIR} || exit 1
 docker compose logs -f --tail=100 core observer
 EOF
 
-# 4. STATUS (NEW)
+# 4. STATUS
 cat >/usr/local/bin/gateway-status <<EOF
 #!/usr/bin/env bash
 cd ${INSTALL_DIR} || exit 1
@@ -326,24 +326,59 @@ docker compose up -d --force-recreate
 echo -e "${GREEN}SSL Renewed.${NC}"
 EOF
 
+# 6. HEALTH CHECK (NEW & POWERFUL)
+cat >/usr/local/bin/gateway-check <<EOF
+#!/usr/bin/env bash
+# .env dosyasından domaini otomatik çeker
+if [ -f "${INSTALL_DIR}/.env" ]; then
+    source "${INSTALL_DIR}/.env"
+    DOMAIN="\$ARNS_ROOT_HOST"
+else
+    echo "Error: .env file not found."
+    exit 1
+fi
+
+echo -e "${YELLOW}Testing API Endpoints for: https://\$DOMAIN${NC}"
+echo
+
+echo -e "${CYAN}>>> Checking Health (/ar-io/healthcheck):${NC}"
+# jq kullanarak çıktıyı renklendirir
+curl -s "https://\$DOMAIN/ar-io/healthcheck" | jq . || echo "Raw output: \$(curl -s "https://\$DOMAIN/ar-io/healthcheck")"
+echo
+
+echo -e "${CYAN}>>> Checking Node Info (/ar-io/info):${NC}"
+curl -s "https://\$DOMAIN/ar-io/info" | jq . || echo "Raw output: \$(curl -s "https://\$DOMAIN/ar-io/info")"
+echo
+
+echo -e "${CYAN}>>> Checking Observer (/ar-io/observer/info):${NC}"
+curl -s "https://\$DOMAIN/ar-io/observer/info" | jq . || echo "Raw output: \$(curl -s "https://\$DOMAIN/ar-io/observer/info")"
+echo
+EOF
+
 chmod +x /usr/local/bin/gateway-update
 chmod +x /usr/local/bin/gateway-restart
 chmod +x /usr/local/bin/gateway-logs
 chmod +x /usr/local/bin/gateway-status
 chmod +x /usr/local/bin/gateway-renew-cert
+chmod +x /usr/local/bin/gateway-check
 
 echo
 echo -e "${GREEN}Installation finished successfully!${NC}"
+echo -e "${YELLOW}Waiting 20 seconds for Gateway to initialize before health check...${NC}"
+sleep 20
+
+# Kurulum sonunda otomatik test
+/usr/local/bin/gateway-check
+
 echo
 echo "------------------------------------------------------------------"
 echo "Gateway URL     : https://${DOMAIN}"
-echo "Test Link       : https://${DOMAIN}/3lyxgbgEvqNSvJrTX2J7CfRychUD5KClFhhVLyTPNCQ"
 echo "------------------------------------------------------------------"
 echo -e "${CYAN}COMMAND LIST:${NC}"
-echo "  gateway-update      : Update node safely (Keeps DB)"
-echo "  gateway-restart     : Full Stop & Start (Clean restart)"
-echo "  gateway-status      : Check system health"
-echo "  gateway-logs        : View live logs"
-echo "  gateway-renew-cert  : Renew SSL (Manual DNS)"
+echo "  gateway-update   : Update node safely"
+echo "  gateway-restart  : Full Stop & Start"
+echo "  gateway-check    : Check Health & API Info (Use this anytime!)"
+echo "  gateway-status   : Check Docker resources"
+echo "  gateway-logs     : View live logs"
 echo "------------------------------------------------------------------"
 echo "Welcome to the AR.IO Network."
