@@ -24,7 +24,7 @@ cat <<'EOF'
 
       Welcome to the First Permanent Cloud Network
         --- AR.IO Gateway Installer by Vevivo ---
-        (Optimized for Ubuntu 22.04 LTS)
+        (Ubuntu 22.04 Native Docker Edition)
 EOF
 
 echo
@@ -103,45 +103,38 @@ echo -e "${GREEN}Keyfile temporarily saved.${NC}"
 START_HEIGHT=1790000
 
 ###############################################################################
-# [2/7] SYSTEM PACKAGES & DOCKER (UBUNTU 22.04)
+# [2/7] SYSTEM PACKAGES & NATIVE DOCKER
 ###############################################################################
 echo
-echo -e "${YELLOW}[2/7] Installing base packages (Ubuntu 22.04)...${NC}"
+echo -e "${YELLOW}[2/7] Installing base packages...${NC}"
 
-# 1. Hata önlemek için apt cache temizliği
-rm -rf /var/lib/apt/lists/*
+# Hata veren harici listeleri temizle
+rm -f /etc/apt/sources.list.d/docker.list
+rm -f /etc/apt/keyrings/docker.asc
+
+# Sistemi temizle ve güncelle
 apt-get clean
+rm -rf /var/lib/apt/lists/*
 apt-get update -y
 apt-get upgrade -y
 
-# 2. Gerekli araçlar (jq eklendi)
-apt-get install -y curl openssh-server git certbot nginx sqlite3 build-essential ca-certificates software-properties-common gnupg jq lsb-release
+# Gerekli araçlar (jq eklendi)
+apt-get install -y curl openssh-server git certbot nginx sqlite3 build-essential ca-certificates software-properties-common jq
 systemctl enable ssh
 
 echo
-echo -e "${YELLOW}[2b/7] Checking Docker...${NC}"
+echo -e "${YELLOW}[2b/7] Installing Docker (Native Method)...${NC}"
 
 if ! command -v docker >/dev/null 2>&1; then
-  echo "Installing Docker (Official Repo Method)..."
+  # Harici site yerine Ubuntu'nun kendi deposunu kullanıyoruz.
+  # Bu yöntem 404 hatası vermez.
+  apt-get install -y docker.io docker-compose-v2
   
-  # Klasör oluştur
-  mkdir -p /etc/apt/keyrings
+  # Docker servisini başlat
+  systemctl start docker
+  systemctl enable docker
   
-  # GPG Key indir (Varsa silip yeniden indir)
-  rm -f /etc/apt/keyrings/docker.asc
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | tee /etc/apt/keyrings/docker.asc > /dev/null
-  chmod a+r /etc/apt/keyrings/docker.asc
-
-  # Repoyu ekle
-  echo \
-    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
-    $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-  
-  # Tekrar update et ve kur
-  apt-get update -y
-  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-  
-  echo "Docker installed successfully."
+  echo "Docker installed successfully via Ubuntu Repo."
 else
   echo "Docker is already installed."
 fi
@@ -208,6 +201,8 @@ fi
 ###############################################################################
 echo
 echo -e "${YELLOW}[6/7] Starting Docker services...${NC}"
+# Native kurulumda 'docker compose' komutu bazen tireli (docker-compose) olabilir
+# Ancak v2 ile 'docker compose' standardı destekleniyor.
 docker compose pull
 docker compose up -d
 
@@ -302,7 +297,7 @@ docker compose up -d --remove-orphans
 echo -e "${GREEN}Update complete!${NC}"
 EOF
 
-# 2. RESTART (FULL STOP & START - As Requested)
+# 2. RESTART (FULL STOP & START)
 cat >/usr/local/bin/gateway-restart <<EOF
 #!/usr/bin/env bash
 echo -e "${YELLOW}Stopping all services...${NC}"
