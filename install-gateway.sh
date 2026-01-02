@@ -115,16 +115,12 @@ systemctl enable ssh
 echo
 echo -e "${YELLOW}[2b/7] Checking Docker...${NC}"
 if ! command -v docker >/dev/null 2>&1; then
-  echo "Installing Docker..."
-  install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-  chmod a+r /etc/apt/keyrings/docker.asc
-  echo \
-    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
-    $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-    tee /etc/apt/sources.list.d/docker.list > /dev/null
-  apt update -y
-  apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  echo "Installing Docker using official script..."
+  # GÜNCELLEME: Manuel repo yerine resmi script kullanımı (Hata önleyici)
+  curl -fsSL https://get.docker.com -o get-docker.sh
+  sh get-docker.sh
+  rm get-docker.sh
+  echo "Docker installed successfully."
 else
   echo "Docker is already installed."
 fi
@@ -326,7 +322,7 @@ docker compose up -d --force-recreate
 echo -e "${GREEN}SSL Renewed.${NC}"
 EOF
 
-# 6. HEALTH CHECK (NEW & POWERFUL)
+# 6. HEALTH CHECK
 cat >/usr/local/bin/gateway-check <<EOF
 #!/usr/bin/env bash
 # .env dosyasından domaini otomatik çeker
@@ -377,7 +373,7 @@ echo "------------------------------------------------------------------"
 echo -e "${CYAN}COMMAND LIST:${NC}"
 echo "  gateway-update   : Update node safely"
 echo "  gateway-restart  : Full Stop & Start"
-echo "  gateway-check    : Check Health & API Info (Use this anytime!)"
+echo "  gateway-check    : Check Health & API Info"
 echo "  gateway-status   : Check Docker resources"
 echo "  gateway-logs     : View live logs"
 echo "------------------------------------------------------------------"
