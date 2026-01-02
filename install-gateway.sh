@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Renk Tanımlamaları
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
 if [[ "$(id -u)" -ne 0 ]]; then
-  echo "Please run this script as root (use sudo)." >&2
+  echo -e "${RED}Please run this script as root (use sudo).${NC}" >&2
   exit 1
 fi
 
@@ -15,34 +22,35 @@ cat <<'EOF'
 ███    ████  ██████████    ███████  ███████    ████  ████  █
 ████  █████        █████  █████        █████  ██████      ██
 
-Welcome to the First Permanent Cloud Network
+      Welcome to the First Permanent Cloud Network
+        --- AR.IO Gateway Installer by Vevivo ---
 EOF
 
 echo
-echo "This installer will set up an AR.IO gateway with:"
+echo -e "${CYAN}This installer will set up an AR.IO gateway with:${NC}"
 echo "  - Docker services (core, envoy, observer, redis, autoheal)"
 echo "  - Let's Encrypt SSL via Certbot (wildcard, DNS challenge)"
 echo "  - Nginx reverse proxy"
-echo "  - Observer enabled by default"
+echo "  - Helper commands for easy management"
 echo
 
 INSTALL_DIR="/opt/ar-io-gateway"
 TMP_KEYFILE="/root/.observer-keyfile.tmp"
 
 ###############################################################################
-# [1/7] BASIC CONFIGURATION (all questions here, one time)
+# [1/7] BASIC CONFIGURATION
 ###############################################################################
-echo "[1/7] Basic configuration"
+echo -e "${YELLOW}[1/7] Basic configuration${NC}"
 
 read -rp "Enter your gateway domain (example: vevivoofficial.xyz): " DOMAIN
 if [[ -z "${DOMAIN}" ]]; then
-  echo "Domain cannot be empty." >&2
+  echo -e "${RED}Domain cannot be empty.${NC}" >&2
   exit 1
 fi
 
 read -rp "Enter your ARIO wallet address (AR_IO_WALLET): " ARIO_WALLET
 if [[ -z "${ARIO_WALLET}" ]]; then
-  echo "AR_IO_WALLET cannot be empty." >&2
+  echo -e "${RED}AR_IO_WALLET cannot be empty.${NC}" >&2
   exit 1
 fi
 
@@ -50,7 +58,7 @@ echo
 read -rp "Enter Observer wallet address (press Enter to use AR_IO_WALLET): " OBSADR
 if [[ -z "${OBSADR}" ]]; then
   OBSADR="${ARIO_WALLET}"
-  echo "Observer wallet will use AR_IO_WALLET: ${OBSADR}"
+  echo -e "${GREEN}Observer wallet set to AR_IO_WALLET.${NC}"
 fi
 
 echo
@@ -58,7 +66,6 @@ read -rp "Enter AO CU URL (press Enter for default https://cu.ardrive.io): " AO_
 if [[ -z "${AO_CU_URL}" ]]; then
   AO_CU_URL="https://cu.ardrive.io"
 fi
-echo "AO_CU_URL set to: ${AO_CU_URL}"
 
 echo
 echo "Choose REPORT_DATA_SINK (turbo / arweave)."
@@ -66,36 +73,31 @@ read -rp "Press Enter for default 'arweave': " REPORT_DATA_SINK
 if [[ -z "${REPORT_DATA_SINK}" ]]; then
   REPORT_DATA_SINK="arweave"
 fi
-echo "REPORT_DATA_SINK set to: ${REPORT_DATA_SINK}"
 
 echo
 read -rp "Enter email address for Certbot (Let's Encrypt notifications): " CERTBOT_EMAIL
 if [[ -z "${CERTBOT_EMAIL}" ]]; then
-  echo "Email cannot be empty for Certbot registration." >&2
+  echo -e "${RED}Email cannot be empty for Certbot registration.${NC}" >&2
   exit 1
 fi
-echo "Certbot email set to: ${CERTBOT_EMAIL}"
 
 echo
-echo "[1b/7] Observer wallet keyfile"
+echo -e "${YELLOW}[1b/7] Observer wallet keyfile${NC}"
 echo "Observer wallet: ${OBSADR}"
 echo
-echo "IMPORTANT:"
-echo "  - Open your Arweave keyfile (.json) on your computer."
-echo "  - Select ALL of the content and copy it."
-echo "  - Paste it here exactly as it is (no changes)."
-echo "  - Do NOT paste the filename, only the file content."
-echo "  - After pasting:"
-echo "      1) Press ENTER to go to a new empty line."
-echo "      2) Press CTRL+D to finish."
+echo -e "${CYAN}IMPORTANT:${NC}"
+echo "  1) Open your Arweave keyfile (.json) on your computer."
+echo "  2) Copy ALL content inside the file."
+echo "  3) Paste it below."
+echo "  4) Press ENTER after pasting."
+echo "  5) Press CTRL+D to save and continue."
 echo
 
-# Keyfile'ı geçici bir yerde tutuyoruz, repo klonlandıktan sonra wallets/ içine taşıyacağız
+# Keyfile input
 cat > "${TMP_KEYFILE}"
 
 echo
-echo "Keyfile temporarily saved to: ${TMP_KEYFILE}"
-echo "Setup will continue without asking again."
+echo -e "${GREEN}Keyfile temporarily saved.${NC}"
 
 START_HEIGHT=1790000
 
@@ -103,15 +105,16 @@ START_HEIGHT=1790000
 # [2/7] SYSTEM PACKAGES, DOCKER, NODE
 ###############################################################################
 echo
-echo "[2/7] Installing base packages (apt, nginx, certbot, etc)..."
+echo -e "${YELLOW}[2/7] Installing base packages...${NC}"
 apt update -y
 apt upgrade -y
 apt install -y curl openssh-server git certbot nginx sqlite3 build-essential ca-certificates software-properties-common
 systemctl enable ssh
 
 echo
-echo "[2b/7] Installing Docker..."
+echo -e "${YELLOW}[2b/7] Checking Docker...${NC}"
 if ! command -v docker >/dev/null 2>&1; then
+  echo "Installing Docker..."
   install -m 0755 -d /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
   chmod a+r /etc/apt/keyrings/docker.asc
@@ -121,10 +124,12 @@ if ! command -v docker >/dev/null 2>&1; then
     tee /etc/apt/sources.list.d/docker.list > /dev/null
   apt update -y
   apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+else
+  echo "Docker is already installed."
 fi
 
 echo
-echo "[2c/7] Installing Node.js (via nvm) and Yarn..."
+echo -e "${YELLOW}[2c/7] Installing Node.js & Yarn...${NC}"
 if [[ ! -d "/root/.nvm" ]]; then
   curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
 fi
@@ -139,9 +144,12 @@ npm install -g yarn@1.22.22
 # [3/7] CLONE AR.IO NODE
 ###############################################################################
 echo
-echo "[3/7] Fetching AR.IO gateway repository..."
+echo -e "${YELLOW}[3/7] Fetching AR.IO gateway repository...${NC}"
 if [[ ! -d "${INSTALL_DIR}" ]]; then
   git clone -b main https://github.com/ar-io/ar-io-node "${INSTALL_DIR}"
+else
+  echo "Directory exists, pulling latest changes..."
+  cd "${INSTALL_DIR}" && git pull
 fi
 
 cd "${INSTALL_DIR}"
@@ -150,7 +158,7 @@ cd "${INSTALL_DIR}"
 # [4/7] .ENV CREATION
 ###############################################################################
 echo
-echo "[4/7] Writing .env file..."
+echo -e "${YELLOW}[4/7] Writing .env file...${NC}"
 cat > .env <<EOF
 GRAPHQL_HOST=arweave.net
 GRAPHQL_PORT=443
@@ -163,60 +171,39 @@ AO_CU_URL=${AO_CU_URL}
 REPORT_DATA_SINK=${REPORT_DATA_SINK}
 EOF
 
-echo
-echo ".env created with:"
-cat .env
-
 ###############################################################################
-# [5/7] MOVE OBSERVER KEYFILE INTO wallets/
+# [5/7] MOVE OBSERVER KEYFILE
 ###############################################################################
 echo
-echo "[5/7] Moving observer keyfile into wallets/ directory..."
+echo -e "${YELLOW}[5/7] Configuring wallets...${NC}"
 mkdir -p wallets
 
 if [[ -f "${TMP_KEYFILE}" ]]; then
   mv "${TMP_KEYFILE}" "wallets/${OBSADR}.json"
-  echo "Observer keyfile moved to: wallets/${OBSADR}.json"
+  echo -e "${GREEN}Observer keyfile set: wallets/${OBSADR}.json${NC}"
 else
-  echo "WARNING: Temporary keyfile ${TMP_KEYFILE} not found. Observer may fail to upload reports." >&2
+  echo -e "${RED}WARNING: Keyfile not found.${NC}" >&2
 fi
 
 ###############################################################################
 # [6/7] DOCKER SERVICES
 ###############################################################################
 echo
-echo "[6/7] Starting Docker services (core, envoy, observer, redis, autoheal)..."
+echo -e "${YELLOW}[6/7] Starting Docker services...${NC}"
 docker compose pull
 docker compose up -d
-
-echo
-echo "Docker services started. You can check with:"
-echo "  cd ${INSTALL_DIR}"
-echo "  docker compose ps"
-echo
 
 ###############################################################################
 # [7/7] CERTBOT + NGINX
 ###############################################################################
 echo
-echo "[7/7] Obtaining SSL certificates with Certbot (DNS challenge for wildcard)..."
+echo -e "${YELLOW}[7/7] SSL Setup (Certbot)...${NC}"
 echo
-echo "Certbot will now ask you to create DNS TXT records."
-echo "When you see something like:"
-echo "  _acme-challenge.${DOMAIN}"
-echo "with a random value:"
-echo "  snbD0McCsC... (example)"
-echo
-echo "Steps:"
-echo "  1) Go to your DNS provider (for example: Namecheap)."
-echo "  2) Add a TXT record:"
-echo "       Host  : _acme-challenge"
-echo "       Value : <the value shown by Certbot>"
-echo "  3) Wait 30–60 seconds for DNS to propagate."
-echo "  4) Then press ENTER in this terminal when Certbot asks."
-echo
-echo "If Certbot asks for a SECOND TXT record, add it the same way"
-echo "and do NOT delete the first one until Certbot finishes."
+echo -e "${CYAN}--- ATTENTION ---${NC}"
+echo "Certbot will ask you to create DNS TXT records."
+echo "1. Go to your DNS Provider (e.g., Namecheap)."
+echo "2. Add the TXT record shown."
+echo "3. WAIT 1 minute before pressing Enter."
 echo
 
 systemctl stop nginx || true
@@ -231,21 +218,18 @@ certbot certonly \
   -d "*.${DOMAIN}"
 
 echo
-echo "Certbot finished. Now configuring Nginx with your domain and certificates..."
+echo -e "${GREEN}Certbot finished. Configuring Nginx...${NC}"
 
 cat > /etc/nginx/sites-available/default <<EOF
-# Force redirects from HTTP to HTTPS
 server {
     listen 80;
     listen [::]:80;
     server_name ${DOMAIN} *.${DOMAIN};
-
     location / {
         return 301 https://\$host\$request_uri;
     }
 }
 
-# Forward traffic to your node and provide SSL certificates
 server {
     listen 443 ssl;
     listen [::]:443 ssl;
@@ -260,8 +244,11 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_http_version 1.1;
+        proxy_set_header X-AR-IO-Origin \$http_x_ar_io_origin;
+        proxy_set_header X-AR-IO-Origin-Node-Release \$http_x_ar_io_origin_node_release;
+        proxy_set_header X-AR-IO-Hops \$http_x_ar_io_hops;
     }
-
+    
     location /grafana/ {
         proxy_pass http://localhost:1024/grafana/;
         proxy_set_header Host \$host;
@@ -272,84 +259,91 @@ server {
 }
 EOF
 
-echo
-echo "Testing Nginx configuration..."
-nginx -t
 echo "Restarting Nginx..."
-systemctl restart nginx
+nginx -t && systemctl restart nginx
 
-echo
-echo "Restarting gateway stack with final configuration..."
+echo "Finalizing gateway stack..."
 cd "${INSTALL_DIR}"
 docker compose down
 docker compose up -d
 
 ###############################################################################
-# Helper command shortcuts
+# HELPER COMMANDS (FIXED & IMPROVED)
 ###############################################################################
 echo
-echo "Creating helper commands under /usr/local/bin ..."
+echo -e "${YELLOW}Creating helper commands...${NC}"
 
+# 1. UPDATE (SAFE: No -v flag)
 cat >/usr/local/bin/gateway-update <<EOF
 #!/usr/bin/env bash
+echo -e "${YELLOW}Updating AR.IO Gateway...${NC}"
 cd ${INSTALL_DIR} || exit 1
-
-# Update repo
 git pull
-
-# Recreate containers with fresh volumes
-docker compose down -v
-docker compose up -d
+docker compose pull
+docker compose up -d --remove-orphans
+echo -e "${GREEN}Update complete!${NC}"
 EOF
 
+# 2. RESTART (FULL SHUTDOWN & START)
+# User request: Stop completely, then start again. (Safe: No -v flag)
 cat >/usr/local/bin/gateway-restart <<EOF
 #!/usr/bin/env bash
+echo -e "${YELLOW}Stopping all services...${NC}"
 cd ${INSTALL_DIR} || exit 1
-
-# Full restart (no volume delete)
 docker compose down
+echo -e "${YELLOW}Starting all services...${NC}"
 docker compose up -d
+echo -e "${GREEN}Gateway has been fully restarted!${NC}"
 EOF
 
+# 3. LOGS (BETTER UX)
 cat >/usr/local/bin/gateway-logs <<EOF
 #!/usr/bin/env bash
 cd ${INSTALL_DIR} || exit 1
-docker compose logs core observer -f
+docker compose logs -f --tail=100 core observer
 EOF
 
+# 4. STATUS (NEW)
+cat >/usr/local/bin/gateway-status <<EOF
+#!/usr/bin/env bash
+cd ${INSTALL_DIR} || exit 1
+echo -e "${CYAN}=== Docker Status ===${NC}"
+docker compose ps
+echo
+echo -e "${CYAN}=== Resources ===${NC}"
+docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}"
+EOF
+
+# 5. RENEW SSL
 cat >/usr/local/bin/gateway-renew-cert <<EOF
 #!/usr/bin/env bash
-echo "Starting manual certificate renewal for ${DOMAIN} ..."
-echo
-echo "Certbot will again ask you to create DNS TXT records:"
-echo "  Host : _acme-challenge"
-echo "  Value: <token provided by Certbot>"
-echo
+echo -e "${YELLOW}Renewing SSL Certificate...${NC}"
 systemctl stop nginx || true
 certbot certonly --manual --preferred-challenges dns --agree-tos --no-eff-email -m "${CERTBOT_EMAIL}" -d ${DOMAIN} -d *.${DOMAIN}
 nginx -t && systemctl restart nginx
-
 cd ${INSTALL_DIR} || exit 1
-docker compose down
-docker compose up -d
+docker compose up -d --force-recreate
+echo -e "${GREEN}SSL Renewed.${NC}"
 EOF
 
 chmod +x /usr/local/bin/gateway-update
 chmod +x /usr/local/bin/gateway-restart
 chmod +x /usr/local/bin/gateway-logs
+chmod +x /usr/local/bin/gateway-status
 chmod +x /usr/local/bin/gateway-renew-cert
 
 echo
-echo "Installation finished."
+echo -e "${GREEN}Installation finished successfully!${NC}"
 echo
-echo "You can test your gateway with:"
-echo "  curl -I https://${DOMAIN}/3lyxgbgEvqNSvJrTX2J7CfRychUD5KClFhhVLyTPNCQ"
-echo
-echo "Useful commands:"
-echo "  gateway-update      → Update to latest version"
-echo "  gateway-restart     → Restart AR.IO gateway"
-echo "  gateway-logs        → View core + observer logs"
-echo "  gateway-renew-cert  → Renew SSL certificate (manual DNS, then restart)"
-echo
-echo "Welcome to the First Permanent Cloud Network."
-
+echo "------------------------------------------------------------------"
+echo "Gateway URL     : https://${DOMAIN}"
+echo "Test Link       : https://${DOMAIN}/3lyxgbgEvqNSvJrTX2J7CfRychUD5KClFhhVLyTPNCQ"
+echo "------------------------------------------------------------------"
+echo -e "${CYAN}COMMAND LIST:${NC}"
+echo "  gateway-update      : Update node safely (Keeps DB)"
+echo "  gateway-restart     : Full Stop & Start (Clean restart)"
+echo "  gateway-status      : Check system health"
+echo "  gateway-logs        : View live logs"
+echo "  gateway-renew-cert  : Renew SSL (Manual DNS)"
+echo "------------------------------------------------------------------"
+echo "Welcome to the AR.IO Network."
