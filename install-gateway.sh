@@ -108,17 +108,15 @@ START_HEIGHT=1790000
 echo
 echo -e "${YELLOW}[2/7] Installing base packages...${NC}"
 
-# Hata veren harici listeleri temizle
+# Temizlik
 rm -f /etc/apt/sources.list.d/docker.list
 rm -f /etc/apt/keyrings/docker.asc
-
-# Sistemi temizle ve güncelle
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 apt-get update -y
 apt-get upgrade -y
 
-# Gerekli araçlar (jq eklendi)
+# Paketler
 apt-get install -y curl openssh-server git certbot nginx sqlite3 build-essential ca-certificates software-properties-common jq
 systemctl enable ssh
 
@@ -126,14 +124,9 @@ echo
 echo -e "${YELLOW}[2b/7] Installing Docker (Native Method)...${NC}"
 
 if ! command -v docker >/dev/null 2>&1; then
-  # Harici site yerine Ubuntu'nun kendi deposunu kullanıyoruz.
-  # Bu yöntem 404 hatası vermez.
   apt-get install -y docker.io docker-compose-v2
-  
-  # Docker servisini başlat
   systemctl start docker
   systemctl enable docker
-  
   echo "Docker installed successfully via Ubuntu Repo."
 else
   echo "Docker is already installed."
@@ -201,8 +194,6 @@ fi
 ###############################################################################
 echo
 echo -e "${YELLOW}[6/7] Starting Docker services...${NC}"
-# Native kurulumda 'docker compose' komutu bazen tireli (docker-compose) olabilir
-# Ancak v2 ile 'docker compose' standardı destekleniyor.
 docker compose pull
 docker compose up -d
 
@@ -297,7 +288,7 @@ docker compose up -d --remove-orphans
 echo -e "${GREEN}Update complete!${NC}"
 EOF
 
-# 2. RESTART (FULL STOP & START)
+# 2. RESTART
 cat >/usr/local/bin/gateway-restart <<EOF
 #!/usr/bin/env bash
 echo -e "${YELLOW}Stopping all services...${NC}"
@@ -338,7 +329,7 @@ docker compose up -d --force-recreate
 echo -e "${GREEN}SSL Renewed.${NC}"
 EOF
 
-# 6. HEALTH CHECK (Otomatik Domain Algılama)
+# 6. HEALTH CHECK (Delayed & Patient)
 cat >/usr/local/bin/gateway-check <<EOF
 #!/usr/bin/env bash
 # .env dosyasından domaini otomatik çeker
@@ -350,19 +341,35 @@ else
     exit 1
 fi
 
+echo -e "${YELLOW}Waiting 10 seconds before checking health (to allow connections)...${NC}"
+# Geri Sayım Efekti
+for i in {10..1}; do echo -n "\$i... " && sleep 1; done
+echo
+echo
+
 echo -e "${YELLOW}Testing API Endpoints for: https://\$DOMAIN${NC}"
 echo
 
-echo -e "${CYAN}>>> Checking Health (/ar-io/healthcheck):${NC}"
-curl -s "https://\$DOMAIN/ar-io/healthcheck" | jq . || echo "Raw output: \$(curl -s "https://\$DOMAIN/ar-io/healthcheck")"
+echo -e "${CYAN}>>> 1. Transaction Data Test (Original Doc):${NC}"
+# --max-time 20: Cevap vermesi için 20 saniye bekle (Timeout'u önler)
+OUTPUT=\$(curl -s --max-time 20 "https://\$DOMAIN/3lyxgbgEvqNSvJrTX2J7CfRychUD5KClFhhVLyTPNCQ")
+if [[ "\$OUTPUT" == *"1984"* ]]; then
+  echo -e "${GREEN}SUCCESS: Transaction data retrieved (Output: 1984)${NC}"
+else
+  echo -e "${RED}FAIL: Transaction test failed. Output: \$OUTPUT${NC}"
+fi
 echo
 
-echo -e "${CYAN}>>> Checking Node Info (/ar-io/info):${NC}"
-curl -s "https://\$DOMAIN/ar-io/info" | jq . || echo "Raw output: \$(curl -s "https://\$DOMAIN/ar-io/info")"
+echo -e "${CYAN}>>> 2. Checking Health (/ar-io/healthcheck):${NC}"
+curl -s --max-time 20 "https://\$DOMAIN/ar-io/healthcheck" | jq . || echo -e "${RED}Core Service not ready yet (Timeout/Error)${NC}"
 echo
 
-echo -e "${CYAN}>>> Checking Observer (/ar-io/observer/info):${NC}"
-curl -s "https://\$DOMAIN/ar-io/observer/info" | jq . || echo "Raw output: \$(curl -s "https://\$DOMAIN/ar-io/observer/info")"
+echo -e "${CYAN}>>> 3. Checking Node Info (/ar-io/info):${NC}"
+curl -s --max-time 20 "https://\$DOMAIN/ar-io/info" | jq . || echo -e "${RED}Core Service not ready yet (Timeout/Error)${NC}"
+echo
+
+echo -e "${CYAN}>>> 4. Checking Observer (/ar-io/observer/info):${NC}"
+curl -s --max-time 20 "https://\$DOMAIN/ar-io/observer/info" | jq . || echo -e "${RED}Observer not ready yet${NC}"
 echo
 EOF
 
@@ -375,8 +382,8 @@ chmod +x /usr/local/bin/gateway-check
 
 echo
 echo -e "${GREEN}Installation finished successfully!${NC}"
-echo -e "${YELLOW}Waiting 20 seconds for Gateway to initialize before health check...${NC}"
-sleep 20
+echo -e "${YELLOW}Waiting 45 seconds for Core Service to initialize...${NC}"
+sleep 45
 
 # Kurulum sonunda otomatik test
 /usr/local/bin/gateway-check
@@ -388,7 +395,7 @@ echo "------------------------------------------------------------------"
 echo -e "${CYAN}COMMAND LIST:${NC}"
 echo "  gateway-update   : Update node safely"
 echo "  gateway-restart  : Full Stop & Start (Clean)"
-echo "  gateway-check    : Check Health & API Info"
+echo "  gateway-check    : Run All Tests (Includes '1984' check)"
 echo "  gateway-status   : Check Docker resources"
 echo "  gateway-logs     : View live logs"
 echo "------------------------------------------------------------------"
