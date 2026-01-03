@@ -329,7 +329,7 @@ docker compose up -d --force-recreate
 echo -e "${GREEN}SSL Renewed.${NC}"
 EOF
 
-# 6. HEALTH CHECK (Improved)
+# 6. HEALTH CHECK (Improved: -L for Redirects)
 cat >/usr/local/bin/gateway-check <<EOF
 #!/usr/bin/env bash
 # .env dosyasından domaini otomatik çeker
@@ -341,12 +341,19 @@ else
     exit 1
 fi
 
+echo -e "${YELLOW}Waiting 10 seconds before checking health (to allow connections)...${NC}"
+# Geri Sayım Efekti
+for i in {10..1}; do echo -n "\$i... " && sleep 1; done
+echo
+echo
+
 echo -e "${YELLOW}Testing API Endpoints for: https://\$DOMAIN${NC}"
 echo
 
 echo -e "${CYAN}>>> 1. Transaction Data Test (Original Doc):${NC}"
-# Bu komut orijinal dokümandaki '1984' kontrolünü yapar
-OUTPUT=\$(curl -s --max-time 10 "https://\$DOMAIN/3lyxgbgEvqNSvJrTX2J7CfRychUD5KClFhhVLyTPNCQ")
+# --max-time 20: Cevap vermesi için 20 saniye bekle
+# -L: Yönlendirmeleri takip et (Redirect sorununu çözer!)
+OUTPUT=\$(curl -L -s --max-time 20 "https://\$DOMAIN/3lyxgbgEvqNSvJrTX2J7CfRychUD5KClFhhVLyTPNCQ")
 if [[ "\$OUTPUT" == *"1984"* ]]; then
   echo -e "${GREEN}SUCCESS: Transaction data retrieved (Output: 1984)${NC}"
 else
@@ -355,15 +362,15 @@ fi
 echo
 
 echo -e "${CYAN}>>> 2. Checking Health (/ar-io/healthcheck):${NC}"
-curl -s --max-time 10 "https://\$DOMAIN/ar-io/healthcheck" | jq . || echo -e "${RED}Core Service not ready yet (Timeout/Error)${NC}"
+curl -s --max-time 20 "https://\$DOMAIN/ar-io/healthcheck" | jq . || echo -e "${RED}Core Service not ready yet (Timeout/Error)${NC}"
 echo
 
 echo -e "${CYAN}>>> 3. Checking Node Info (/ar-io/info):${NC}"
-curl -s --max-time 10 "https://\$DOMAIN/ar-io/info" | jq . || echo -e "${RED}Core Service not ready yet (Timeout/Error)${NC}"
+curl -s --max-time 20 "https://\$DOMAIN/ar-io/info" | jq . || echo -e "${RED}Core Service not ready yet (Timeout/Error)${NC}"
 echo
 
 echo -e "${CYAN}>>> 4. Checking Observer (/ar-io/observer/info):${NC}"
-curl -s --max-time 10 "https://\$DOMAIN/ar-io/observer/info" | jq . || echo -e "${RED}Observer not ready yet${NC}"
+curl -s --max-time 20 "https://\$DOMAIN/ar-io/observer/info" | jq . || echo -e "${RED}Observer not ready yet${NC}"
 echo
 EOF
 
@@ -376,8 +383,9 @@ chmod +x /usr/local/bin/gateway-check
 
 echo
 echo -e "${GREEN}Installation finished successfully!${NC}"
-echo -e "${YELLOW}Waiting 45 seconds for Core Service to initialize...${NC}"
-sleep 45
+# İsteğin üzerine süre 10 saniye yapıldı
+echo -e "${YELLOW}Waiting 10 seconds for Core Service to initialize...${NC}"
+sleep 10
 
 # Kurulum sonunda otomatik test
 /usr/local/bin/gateway-check
