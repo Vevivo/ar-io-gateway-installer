@@ -24,7 +24,7 @@ cat <<'EOF'
 
       Welcome to the First Permanent Cloud Network
         --- AR.IO Gateway Installer by Vevivo ---
-        (Ubuntu 22.04 Native Docker Edition)
+        
 EOF
 
 echo
