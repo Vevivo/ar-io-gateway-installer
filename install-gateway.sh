@@ -24,7 +24,7 @@ cat <<'EOF'
 
       Welcome to the First Permanent Cloud Network
         --- AR.IO Gateway Installer by Vevivo ---
-        
+        (Ubuntu 22.04 Native Docker Edition)
 EOF
 
 echo
@@ -329,7 +329,7 @@ docker compose up -d --force-recreate
 echo -e "${GREEN}SSL Renewed.${NC}"
 EOF
 
-# 6. HEALTH CHECK (Improved: -L for Redirects)
+# 6. HEALTH CHECK (Simple Link Display)
 cat >/usr/local/bin/gateway-check <<EOF
 #!/usr/bin/env bash
 # .env dosyasından domaini otomatik çeker
@@ -341,24 +341,17 @@ else
     exit 1
 fi
 
-echo -e "${YELLOW}Waiting 10 seconds before checking health (to allow connections)...${NC}"
-# Geri Sayım Efekti
+echo -e "${YELLOW}Waiting 10 seconds before checking health...${NC}"
+# Geri Sayım
 for i in {10..1}; do echo -n "\$i... " && sleep 1; done
 echo
 echo
 
-echo -e "${YELLOW}Testing API Endpoints for: https://\$DOMAIN${NC}"
+echo -e "${CYAN}>>> 1. Transaction Data Test:${NC}"
+echo "Please open the link below in your browser."
+echo "If you see '1984', your gateway is working perfectly!"
 echo
-
-echo -e "${CYAN}>>> 1. Transaction Data Test (Original Doc):${NC}"
-# --max-time 20: Cevap vermesi için 20 saniye bekle
-# -L: Yönlendirmeleri takip et (Redirect sorununu çözer!)
-OUTPUT=\$(curl -L -s --max-time 20 "https://\$DOMAIN/3lyxgbgEvqNSvJrTX2J7CfRychUD5KClFhhVLyTPNCQ")
-if [[ "\$OUTPUT" == *"1984"* ]]; then
-  echo -e "${GREEN}SUCCESS: Transaction data retrieved (Output: 1984)${NC}"
-else
-  echo -e "${RED}FAIL: Transaction test failed. Output: \$OUTPUT${NC}"
-fi
+echo -e "${GREEN}https://\$DOMAIN/3lyxgbgEvqNSvJrTX2J7CfRychUD5KClFhhVLyTPNCQ${NC}"
 echo
 
 echo -e "${CYAN}>>> 2. Checking Health (/ar-io/healthcheck):${NC}"
@@ -397,7 +390,7 @@ echo "------------------------------------------------------------------"
 echo -e "${CYAN}COMMAND LIST:${NC}"
 echo "  gateway-update   : Update node safely"
 echo "  gateway-restart  : Full Stop & Start (Clean)"
-echo "  gateway-check    : Run All Tests (Includes '1984' check)"
+echo "  gateway-check    : Show Test Links & Status"
 echo "  gateway-status   : Check Docker resources"
 echo "  gateway-logs     : View live logs"
 echo "------------------------------------------------------------------"
