@@ -282,9 +282,17 @@ cat >/usr/local/bin/gateway-update <<EOF
 #!/usr/bin/env bash
 echo -e "${YELLOW}Updating AR.IO Gateway...${NC}"
 cd ${INSTALL_DIR} || exit 1
+
+# 1. Durdur (Veri kaybetmeden)
+docker compose down
+
+# 2. Repo'yu güncelle (Main branch garantisi)
+git checkout main
 git pull
-docker compose pull
-docker compose up -d --remove-orphans
+
+# 3. Yeniden başlat ve Build et
+docker compose up -d --build
+
 echo -e "${GREEN}Update complete!${NC}"
 EOF
 
