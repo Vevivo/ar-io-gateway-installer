@@ -100,7 +100,7 @@ cat > "${TMP_KEYFILE}"
 echo
 echo -e "${GREEN}Keyfile temporarily saved.${NC}"
 
-START_HEIGHT=1790000
+START_HEIGHT=1830000
 
 ###############################################################################
 # [2/7] SYSTEM PACKAGES & NATIVE DOCKER
