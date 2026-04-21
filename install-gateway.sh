@@ -174,7 +174,6 @@ REPORT_DATA_SINK=${REPORT_DATA_SINK}
 ARNS_RESOLVER_PRIORITY_ORDER=on-demand,gateway
 ARNS_COMPOSITE_RESOLVER_TIMEOUT_MS=3000
 ARNS_CACHE_TTL_MS=3600000
-TRUSTED_GATEWAYS_URLS={"https://turbo-gateway.com": {"priority": 1, "trusted": true}, "https://arweave.net": {"priority": 2, "trusted": false}}
 ON_DEMAND_RETRIEVAL_ORDER=trusted-gateways,ar-io-network,chunks-offset-aware,tx-data
 HTTPSIG_ENABLED=true
 HTTPSIG_UPLOAD_ATTESTATION=true
