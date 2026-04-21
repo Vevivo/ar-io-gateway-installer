@@ -100,7 +100,7 @@ cat > "${TMP_KEYFILE}"
 echo
 echo -e "${GREEN}Keyfile temporarily saved.${NC}"
 
-START_HEIGHT=1890000
+START_HEIGHT=1900000
 
 ###############################################################################
 # [2/7] SYSTEM PACKAGES & NATIVE DOCKER
@@ -164,8 +164,6 @@ cd "${INSTALL_DIR}"
 echo
 echo -e "${YELLOW}[4/7] Writing .env file...${NC}"
 cat > .env <<EOF
-GRAPHQL_HOST=arweave.net
-GRAPHQL_PORT=443
 START_HEIGHT=${START_HEIGHT}
 RUN_OBSERVER=true
 ARNS_ROOT_HOST=${DOMAIN}
@@ -173,6 +171,13 @@ AR_IO_WALLET=${ARIO_WALLET}
 OBSERVER_WALLET=${OBSADR}
 AO_CU_URL=${AO_CU_URL}
 REPORT_DATA_SINK=${REPORT_DATA_SINK}
+ARNS_RESOLVER_PRIORITY_ORDER=on-demand,gateway
+ARNS_COMPOSITE_RESOLVER_TIMEOUT_MS=3000
+ARNS_CACHE_TTL_MS=3600000
+TRUSTED_GATEWAYS_URLS={"https://turbo-gateway.com": {"priority": 1, "trusted": true}, "https://arweave.net": {"priority": 2, "trusted": false}}
+ON_DEMAND_RETRIEVAL_ORDER=trusted-gateways,ar-io-network,chunks-offset-aware,tx-data
+HTTPSIG_ENABLED=true
+HTTPSIG_UPLOAD_ATTESTATION=true
 EOF
 
 ###############################################################################
