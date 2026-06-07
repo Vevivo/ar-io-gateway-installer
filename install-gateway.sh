@@ -1,21 +1,100 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
-# Renk Tanımlamaları
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+BOLD='\033[1m'
+NC='\033[0m'
 
-if [[ "$(id -u)" -ne 0 ]]; then
-  echo -e "${RED}Please run this script as root (use sudo).${NC}" >&2
-  exit 1
-fi
+INSTALL_DIR="${INSTALL_DIR:-/opt/ar-io-node}"
+DOMAIN="${ARNS_ROOT_HOST:-${DOMAIN:-}}"
+AR_IO_WALLET="${AR_IO_WALLET:-${ARIO_WALLET:-}}"
+OBSERVER_WALLET="${OBSERVER_WALLET:-}"
+GRAPHQL_HOST="${GRAPHQL_HOST:-turbo-gateway.com}"
+GRAPHQL_PORT="${GRAPHQL_PORT:-443}"
+START_HEIGHT="${START_HEIGHT:-1000000}"
+GATEWAY_TEST_TX="3lyxgbgEvqNSvJrTX2J7CfRychUD5KClFhhVLyTPNCQ"
 
-clear
+X402_ENABLED="false"
+X402_NETWORK="base"
+X402_WALLET_ADDRESS=""
+X402_FACILITATOR_URL="https://facilitator.x402.rs"
+X402_PER_BYTE_PRICE="0.0000000001"
+X402_MIN_PRICE="0.001"
+X402_MAX_PRICE="1.00"
+X402_CAPACITY_MULTIPLIER="10"
+X402_APP_NAME=""
+X402_APP_LOGO=""
+X402_CDP_CLIENT_KEY=""
+CDP_API_KEY_ID=""
+CDP_SECRET_VALUE=""
+CHUNK_GET_BASE64_SIZE_BYTES="368640"
+RATE_LIMITER_TYPE="redis"
+RATE_LIMITER_REDIS_ENDPOINT="redis://redis:6379"
+RATE_LIMITER_IP_BUCKET="100000"
+RATE_LIMITER_IP_REFILL="20"
+RATE_LIMITER_RESOURCE_BUCKET="1000000"
+RATE_LIMITER_RESOURCE_REFILL="100"
+RATE_LIMITER_IP_ALLOWLIST=""
+RATE_LIMITER_ARNS_ALLOWLIST=""
+EXTRA_REDIS_FLAGS="--save 300 10 --appendonly yes --appendfsync everysec"
+ENABLE_DEBUG_LOGS="false"
 
-cat <<'EOF'
+log() { printf "%b\n" "${CYAN}==>${NC} $*"; }
+ok() { printf "%b\n" "${GREEN}OK${NC} $*"; }
+warn() { printf "%b\n" "${YELLOW}WARN${NC} $*"; }
+die() { printf "%b\n" "${RED}ERROR${NC} $*" >&2; exit 1; }
+
+prompt() {
+  local label="$1"
+  local default="${2:-}"
+  local value
+  if [[ -n "$default" ]]; then
+    printf "%s [%s]: " "$label" "$default" >&2
+    read -r value
+    printf "%s" "${value:-$default}"
+  else
+    printf "%s: " "$label" >&2
+    read -r value
+    printf "%s" "$value"
+  fi
+}
+
+confirm() {
+  local label="$1"
+  local default="${2:-n}"
+  local suffix="[y/N]"
+  local value
+  [[ "$default" == "y" ]] && suffix="[Y/n]"
+  printf "%s %s: " "$label" "$suffix" >&2
+  read -r value
+  value="${value:-$default}"
+  value="$(printf "%s" "$value" | tr '[:upper:]' '[:lower:]')"
+  [[ "$value" == "y" || "$value" == "yes" || "$value" == "e" || "$value" == "evet" ]]
+}
+
+normalize_domain() {
+  local raw="$1"
+  raw="${raw#http://}"
+  raw="${raw#https://}"
+  raw="${raw%%/*}"
+  raw="${raw%%:*}"
+  printf "%s" "$raw" | tr '[:upper:]' '[:lower:]'
+}
+
+is_evm_address() {
+  [[ "$1" =~ ^0x[0-9a-fA-F]{40}$ ]]
+}
+
+require_root() {
+  [[ "$(id -u)" -eq 0 ]] || die "Please run as root: sudo bash install-gateway.sh"
+}
+
+header() {
+  clear || true
+  cat <<'EOF'
 ░  ░░░░  ░░        ░░  ░░░░  ░░        ░░  ░░░░  ░░░      ░░
 ▒  ▒▒▒▒  ▒▒  ▒▒▒▒▒▒▒▒  ▒▒▒▒  ▒▒▒▒▒  ▒▒▒▒▒  ▒▒▒▒  ▒▒  ▒▒▒▒  ▒
 ▓▓  ▓▓  ▓▓▓      ▓▓▓▓▓  ▓▓  ▓▓▓▓▓▓  ▓▓▓▓▓▓  ▓▓  ▓▓▓  ▓▓▓▓  ▓
@@ -24,161 +103,175 @@ cat <<'EOF'
 
       Welcome to the First Permanent Cloud Network
         --- AR.IO Gateway Installer by Vevivo ---
-        
+
+                Solana-era production setup
 EOF
+  echo
+  echo "This installer sets up:"
+  echo "  - ar-io-node from main"
+  echo "  - Docker Compose services"
+  echo "  - nginx reverse proxy"
+  echo "  - wildcard SSL with Certbot DNS challenge"
+  echo "  - Solana observer keyfile placement"
+  echo "  - optional x402 USDC data egress payments"
+  echo "  - helper commands: gateway-check, logs, status, update"
+  echo
+  echo "It does NOT register or change your gateway on the platform."
+  echo
+}
 
-echo
-echo -e "${CYAN}This installer will set up an AR.IO gateway with:${NC}"
-echo "  - Docker services (core, envoy, observer, redis, autoheal)"
-echo "  - Let's Encrypt SSL via Certbot (wildcard, DNS challenge)"
-echo "  - Nginx reverse proxy"
-echo "  - Helper commands (restart, update, status, check)"
-echo
+collect_config() {
+  log "[1/8] Configuration"
 
-INSTALL_DIR="/opt/ar-io-gateway"
-TMP_KEYFILE="/root/.observer-keyfile.tmp"
+  DOMAIN="$(normalize_domain "$(prompt "Gateway domain" "$DOMAIN")")"
+  [[ -n "$DOMAIN" ]] || die "Domain cannot be empty."
 
-###############################################################################
-# [1/7] BASIC CONFIGURATION
-###############################################################################
-echo -e "${YELLOW}[1/7] Basic configuration${NC}"
+  AR_IO_WALLET="$(prompt "Solana gateway wallet / AR_IO_WALLET" "$AR_IO_WALLET")"
+  [[ -n "$AR_IO_WALLET" ]] || die "AR_IO_WALLET cannot be empty."
 
-read -rp "Enter your gateway domain (example: vevivoofficial.xyz): " DOMAIN
-if [[ -z "${DOMAIN}" ]]; then
-  echo -e "${RED}Domain cannot be empty.${NC}" >&2
-  exit 1
-fi
+  if [[ -z "$OBSERVER_WALLET" ]]; then
+    OBSERVER_WALLET="$AR_IO_WALLET"
+  fi
+  echo "Observer wallet: ${OBSERVER_WALLET} (same as AR_IO_WALLET)"
 
-read -rp "Enter your ARIO wallet address (AR_IO_WALLET): " ARIO_WALLET
-if [[ -z "${ARIO_WALLET}" ]]; then
-  echo -e "${RED}AR_IO_WALLET cannot be empty.${NC}" >&2
-  exit 1
-fi
+  echo "GRAPHQL_HOST: ${GRAPHQL_HOST}"
+  echo "START_HEIGHT: ${START_HEIGHT}"
 
-echo
-read -rp "Enter Observer wallet address (press Enter to use AR_IO_WALLET): " OBSADR
-if [[ -z "${OBSADR}" ]]; then
-  OBSADR="${ARIO_WALLET}"
-  echo -e "${GREEN}Observer wallet set to AR_IO_WALLET.${NC}"
-fi
+  REPORT_DATA_SINK=""
+  if confirm "Use AR for observer report uploads instead of default Turbo Credits" "n"; then
+    REPORT_DATA_SINK="arweave"
+  fi
 
-echo
-read -rp "Enter AO CU URL (press Enter for default https://cu.ardrive.io): " AO_CU_URL
-if [[ -z "${AO_CU_URL}" ]]; then
-  AO_CU_URL="https://cu.ardrive.io"
-fi
+  if confirm "Enable optional x402 USDC data egress payments" "n"; then
+    X402_ENABLED="true"
+    echo
+    echo "x402 mainnet defaults will be used. You need an EVM/Base USDC receiver wallet."
+    RATE_LIMITER_TYPE="$(prompt "Rate limiter type" "$RATE_LIMITER_TYPE")"
+    [[ "$RATE_LIMITER_TYPE" == "redis" || "$RATE_LIMITER_TYPE" == "memory" ]] || die "Rate limiter type must be redis or memory."
+    if [[ "$RATE_LIMITER_TYPE" == "redis" ]]; then
+      RATE_LIMITER_REDIS_ENDPOINT="$(prompt "Redis endpoint" "$RATE_LIMITER_REDIS_ENDPOINT")"
+      EXTRA_REDIS_FLAGS="$(prompt "Redis persistence flags" "$EXTRA_REDIS_FLAGS")"
+    fi
+    RATE_LIMITER_IP_BUCKET="$(prompt "RATE_LIMITER_IP_TOKENS_PER_BUCKET" "$RATE_LIMITER_IP_BUCKET")"
+    RATE_LIMITER_IP_REFILL="$(prompt "RATE_LIMITER_IP_REFILL_PER_SEC" "$RATE_LIMITER_IP_REFILL")"
+    RATE_LIMITER_RESOURCE_BUCKET="$(prompt "RATE_LIMITER_RESOURCE_TOKENS_PER_BUCKET" "$RATE_LIMITER_RESOURCE_BUCKET")"
+    RATE_LIMITER_RESOURCE_REFILL="$(prompt "RATE_LIMITER_RESOURCE_REFILL_PER_SEC" "$RATE_LIMITER_RESOURCE_REFILL")"
 
-echo
-echo "Choose REPORT_DATA_SINK (turbo / arweave)."
-read -rp "Press Enter for default 'arweave': " REPORT_DATA_SINK
-if [[ -z "${REPORT_DATA_SINK}" ]]; then
-  REPORT_DATA_SINK="arweave"
-fi
+    X402_NETWORK="$(prompt "x402 network: base for mainnet, base-sepolia for testnet" "$X402_NETWORK")"
+    [[ "$X402_NETWORK" == "base" || "$X402_NETWORK" == "base-sepolia" ]] || die "x402 network must be base or base-sepolia."
+    if [[ "$X402_NETWORK" == "base-sepolia" && "$X402_FACILITATOR_URL" == "https://facilitator.x402.rs" ]]; then
+      X402_FACILITATOR_URL="https://x402.org/facilitator"
+    fi
+    X402_WALLET_ADDRESS="$(prompt "x402 EVM/Base USDC receiver wallet address" "$X402_WALLET_ADDRESS")"
+    is_evm_address "$X402_WALLET_ADDRESS" || die "x402 requires a valid EVM/Base address like 0x..."
+    X402_FACILITATOR_URL="$(prompt "x402 facilitator URL" "$X402_FACILITATOR_URL")"
+    X402_PER_BYTE_PRICE="$(prompt "x402 per-byte price" "$X402_PER_BYTE_PRICE")"
+    X402_MIN_PRICE="$(prompt "x402 min price" "$X402_MIN_PRICE")"
+    X402_MAX_PRICE="$(prompt "x402 max price" "$X402_MAX_PRICE")"
+    X402_CAPACITY_MULTIPLIER="$(prompt "x402 capacity multiplier" "$X402_CAPACITY_MULTIPLIER")"
 
-echo
-read -rp "Enter email address for Certbot (Let's Encrypt notifications): " CERTBOT_EMAIL
-if [[ -z "${CERTBOT_EMAIL}" ]]; then
-  echo -e "${RED}Email cannot be empty for Certbot registration.${NC}" >&2
-  exit 1
-fi
+    X402_APP_NAME="$(prompt "Paywall app name" "${DOMAIN:-My ar.io Gateway}")"
+    X402_APP_LOGO="$(prompt "Paywall app logo URL, blank allowed" "")"
+    CHUNK_GET_BASE64_SIZE_BYTES="$(prompt "CHUNK_GET_BASE64_SIZE_BYTES" "$CHUNK_GET_BASE64_SIZE_BYTES")"
+    RATE_LIMITER_IP_ALLOWLIST="$(prompt "IP/CIDR allowlist, comma-separated, blank allowed" "")"
+    RATE_LIMITER_ARNS_ALLOWLIST="$(prompt "ArNS allowlist, comma-separated, blank allowed" "")"
 
-echo
-echo -e "${YELLOW}[1b/7] Observer wallet keyfile${NC}"
-echo "Observer wallet: ${OBSADR}"
-echo
-echo -e "${CYAN}IMPORTANT:${NC}"
-echo "  1) Open your Arweave keyfile (.json) on your computer."
-echo "  2) Copy ALL content inside the file."
-echo "  3) Paste it below."
-echo "  4) Press ENTER after pasting."
-echo "  5) Press CTRL+D to save and continue."
-echo
+    if confirm "Enable x402 debug logging / LOG_LEVEL=debug" "n"; then
+      ENABLE_DEBUG_LOGS="true"
+    fi
 
-# Keyfile input
-cat > "${TMP_KEYFILE}"
+    if confirm "Configure optional Coinbase CDP onramp keys now" "n"; then
+      CDP_API_KEY_ID="$(prompt "CDP_API_KEY_ID" "")"
+      X402_CDP_CLIENT_KEY="$(prompt "X_402_CDP_CLIENT_KEY public client key" "")"
+      printf "Paste CDP API secret key (hidden, blank to skip): " >&2
+      read -r -s CDP_SECRET_VALUE
+      printf "\n" >&2
+    fi
+  fi
+}
 
-echo
-echo -e "${GREEN}Keyfile temporarily saved.${NC}"
+install_packages() {
+  log "[2/8] Installing base packages"
+  apt-get update -y
+  DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+  DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    curl openssh-server git certbot nginx sqlite3 build-essential \
+    ca-certificates gnupg jq ufw lsb-release openssl dnsutils python3
+  systemctl enable --now ssh >/dev/null 2>&1 || systemctl enable --now sshd >/dev/null 2>&1 || true
+}
 
-START_HEIGHT=1900000
+install_docker() {
+  log "[3/8] Installing Docker"
+  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    ok "Docker and Docker Compose are already installed."
+    systemctl enable --now docker >/dev/null 2>&1 || true
+    return
+  fi
 
-###############################################################################
-# [2/7] SYSTEM PACKAGES & NATIVE DOCKER
-###############################################################################
-echo
-echo -e "${YELLOW}[2/7] Installing base packages...${NC}"
+  install -m 0755 -d /etc/apt/keyrings
+  . /etc/os-release
+  local distro="${ID:-ubuntu}"
+  local codename="${VERSION_CODENAME:-}"
+  [[ -n "$codename" ]] || codename="$(lsb_release -cs)"
+  curl -fsSL "https://download.docker.com/linux/${distro}/gpg" -o /etc/apt/keyrings/docker.asc
+  chmod a+r /etc/apt/keyrings/docker.asc
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${distro} ${codename} stable" \
+    > /etc/apt/sources.list.d/docker.list
+  apt-get update -y
+  DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  systemctl enable --now docker
+}
 
-# Temizlik
-rm -f /etc/apt/sources.list.d/docker.list
-rm -f /etc/apt/keyrings/docker.asc
-apt-get clean
-rm -rf /var/lib/apt/lists/*
-apt-get update -y
-apt-get upgrade -y
+clone_node() {
+  log "[4/8] Installing ar-io-node"
+  if [[ -d "$INSTALL_DIR/.git" ]]; then
+    cd "$INSTALL_DIR"
+    git checkout main
+    git pull --ff-only origin main
+  else
+    mkdir -p "$(dirname "$INSTALL_DIR")"
+    git clone -b main https://github.com/ar-io/ar-io-node "$INSTALL_DIR"
+  fi
+}
 
-# Paketler
-apt-get install -y curl openssh-server git certbot nginx sqlite3 build-essential ca-certificates software-properties-common jq
-systemctl enable ssh
+write_env() {
+  log "[5/8] Writing .env"
+  cd "$INSTALL_DIR"
+  [[ -f .env ]] && cp .env ".env.backup.$(date +%Y%m%d-%H%M%S)"
+  local admin_key
+  local log_level="info"
+  admin_key="$(openssl rand -hex 32)"
+  [[ "$ENABLE_DEBUG_LOGS" == "true" ]] && log_level="debug"
 
-echo
-echo -e "${YELLOW}[2b/7] Installing Docker (Native Method)...${NC}"
+  umask 077
+  cat > .env <<EOF
+# Generated by Vevivo ar.io gateway installer
+NODE_ENV=production
+LOG_LEVEL=${log_level}
+ADMIN_API_KEY=${admin_key}
 
-if ! command -v docker >/dev/null 2>&1; then
-  apt-get install -y docker.io docker-compose-v2
-  systemctl start docker
-  systemctl enable docker
-  echo "Docker installed successfully via Ubuntu Repo."
-else
-  echo "Docker is already installed."
-fi
-
-echo
-echo -e "${YELLOW}[2c/7] Installing Node.js & Yarn...${NC}"
-if [[ ! -d "/root/.nvm" ]]; then
-  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
-fi
-export NVM_DIR="$HOME/.nvm"
-# shellcheck disable=SC1090
-[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-nvm install 20.11.1
-nvm use 20.11.1
-npm install -g yarn@1.22.22
-
-###############################################################################
-# [3/7] CLONE AR.IO NODE
-###############################################################################
-echo
-echo -e "${YELLOW}[3/7] Fetching AR.IO gateway repository...${NC}"
-if [[ ! -d "${INSTALL_DIR}" ]]; then
-  git clone -b main https://github.com/ar-io/ar-io-node "${INSTALL_DIR}"
-else
-  echo "Directory exists, pulling latest changes..."
-  cd "${INSTALL_DIR}" && git pull
-fi
-
-cd "${INSTALL_DIR}"
-
-###############################################################################
-# [4/7] .ENV CREATION
-###############################################################################
-echo
-echo -e "${YELLOW}[4/7] Writing .env file...${NC}"
-cat > .env <<EOF
+GRAPHQL_HOST=${GRAPHQL_HOST}
+GRAPHQL_PORT=${GRAPHQL_PORT}
 START_HEIGHT=${START_HEIGHT}
+START_WRITERS=true
+
 RUN_OBSERVER=true
 ARNS_ROOT_HOST=${DOMAIN}
-AR_IO_WALLET=${ARIO_WALLET}
-OBSERVER_WALLET=${OBSADR}
-AO_CU_URL=${AO_CU_URL}
-REPORT_DATA_SINK=${REPORT_DATA_SINK}
+AR_IO_WALLET=${AR_IO_WALLET}
+OBSERVER_WALLET=${OBSERVER_WALLET}
+WALLETS_PATH=./wallets
+
+SANDBOX_PROTOCOL=https
+HTTPSIG_ENABLED=true
+HTTPSIG_BIND_REQUEST=true
+HTTPSIG_UPLOAD_ATTESTATION=true
+
 ARNS_RESOLVER_PRIORITY_ORDER=on-demand,gateway
 ARNS_COMPOSITE_RESOLVER_TIMEOUT_MS=3000
 ARNS_CACHE_TTL_MS=3600000
 ON_DEMAND_RETRIEVAL_ORDER=trusted-gateways,ar-io-network,chunks-offset-aware,tx-data
 TRUSTED_GATEWAYS_REQUEST_TIMEOUT_MS=10000
-HTTPSIG_ENABLED=true
-HTTPSIG_BIND_REQUEST=true
-HTTPSIG_UPLOAD_ATTESTATION=true
 GRAPHQL_ON_DEMAND_RESOLUTION_ENABLED=true
 GRAPHQL_ON_DEMAND_RESOLUTION_TIMEOUT_MS=5000
 GRAPHQL_ON_DEMAND_RESOLUTION_MAX_CONCURRENT=1
@@ -192,62 +285,307 @@ GRAPHQL_RESOLVER_DEADLINE_MS=12000
 BUNDLE_DATA_ITEM_DRAIN_BATCH=100
 DATA_ITEM_INDEXER_QUEUE_SIZE=500000
 ANS104_DATA_INDEXER_QUEUE_SIZE=500000
+
+RUN_AUTOHEAL=true
 EOF
 
-###############################################################################
-# [5/7] MOVE OBSERVER KEYFILE
-###############################################################################
-echo
-echo -e "${YELLOW}[5/7] Configuring wallets...${NC}"
-mkdir -p wallets
+  if [[ "$REPORT_DATA_SINK" == "arweave" ]]; then
+    printf "REPORT_DATA_SINK=arweave\n" >> .env
+  fi
 
-if [[ -f "${TMP_KEYFILE}" ]]; then
-  mv "${TMP_KEYFILE}" "wallets/${OBSADR}.json"
-  echo -e "${GREEN}Observer keyfile set: wallets/${OBSADR}.json${NC}"
-else
-  echo -e "${RED}WARNING: Keyfile not found.${NC}" >&2
-fi
+  if [[ "$X402_ENABLED" == "true" ]]; then
+    mkdir -p secrets
+    chmod 700 secrets
+    if [[ -n "$CDP_SECRET_VALUE" ]]; then
+      printf "%s" "$CDP_SECRET_VALUE" > secrets/cdp_secret_key
+      chmod 600 secrets/cdp_secret_key
+      unset CDP_SECRET_VALUE
+    fi
 
-###############################################################################
-# [6/7] DOCKER SERVICES
-###############################################################################
-echo
-echo -e "${YELLOW}[6/7] Starting Docker services...${NC}"
-docker compose pull
-docker compose up -d
+    cat >> .env <<EOF
 
-###############################################################################
-# [7/7] CERTBOT + NGINX
-###############################################################################
-echo
-echo -e "${YELLOW}[7/7] SSL Setup (Certbot)...${NC}"
-echo
-echo -e "${CYAN}--- ATTENTION ---${NC}"
-echo "Certbot will ask you to create DNS TXT records."
-echo "1. Go to your DNS Provider (e.g., Namecheap)."
-echo "2. Add the TXT record shown."
-echo "3. WAIT 1 minute before pressing Enter."
-echo
+# x402 mainnet configuration. x402 requires the rate limiter.
+ENABLE_RATE_LIMITER=true
+RATE_LIMITER_TYPE=${RATE_LIMITER_TYPE}
+RATE_LIMITER_IP_TOKENS_PER_BUCKET=${RATE_LIMITER_IP_BUCKET}
+RATE_LIMITER_IP_REFILL_PER_SEC=${RATE_LIMITER_IP_REFILL}
+RATE_LIMITER_RESOURCE_TOKENS_PER_BUCKET=${RATE_LIMITER_RESOURCE_BUCKET}
+RATE_LIMITER_RESOURCE_REFILL_PER_SEC=${RATE_LIMITER_RESOURCE_REFILL}
 
-systemctl stop nginx || true
+ENABLE_X_402_USDC_DATA_EGRESS=true
+X_402_USDC_NETWORK=${X402_NETWORK}
+X_402_USDC_WALLET_ADDRESS=${X402_WALLET_ADDRESS}
+X_402_USDC_FACILITATOR_URL=${X402_FACILITATOR_URL}
+X_402_USDC_PER_BYTE_PRICE=${X402_PER_BYTE_PRICE}
+X_402_USDC_DATA_EGRESS_MIN_PRICE=${X402_MIN_PRICE}
+X_402_USDC_DATA_EGRESS_MAX_PRICE=${X402_MAX_PRICE}
+X_402_RATE_LIMIT_CAPACITY_MULTIPLIER=${X402_CAPACITY_MULTIPLIER}
+X_402_APP_NAME=${X402_APP_NAME}
+X_402_APP_LOGO=${X402_APP_LOGO}
+CHUNK_GET_BASE64_SIZE_BYTES=${CHUNK_GET_BASE64_SIZE_BYTES}
+EOF
 
-certbot certonly \
-  --manual \
-  --preferred-challenges dns \
-  --agree-tos \
-  --no-eff-email \
-  -m "${CERTBOT_EMAIL}" \
-  -d "${DOMAIN}" \
-  -d "*.${DOMAIN}"
+    if [[ "$RATE_LIMITER_TYPE" == "redis" ]]; then
+      {
+        printf "RATE_LIMITER_REDIS_ENDPOINT=%s\n" "$RATE_LIMITER_REDIS_ENDPOINT"
+        printf "EXTRA_REDIS_FLAGS=%s\n" "$EXTRA_REDIS_FLAGS"
+      } >> .env
+    fi
+    [[ -n "$RATE_LIMITER_IP_ALLOWLIST" ]] && printf "RATE_LIMITER_IPS_AND_CIDRS_ALLOWLIST=%s\n" "$RATE_LIMITER_IP_ALLOWLIST" >> .env
+    [[ -n "$RATE_LIMITER_ARNS_ALLOWLIST" ]] && printf "RATE_LIMITER_ARNS_ALLOWLIST=%s\n" "$RATE_LIMITER_ARNS_ALLOWLIST" >> .env
+    [[ -n "$CDP_API_KEY_ID" ]] && printf "CDP_API_KEY_ID=%s\n" "$CDP_API_KEY_ID" >> .env
+    [[ -n "$X402_CDP_CLIENT_KEY" ]] && printf "X_402_CDP_CLIENT_KEY=%s\n" "$X402_CDP_CLIENT_KEY" >> .env
+    [[ -f secrets/cdp_secret_key ]] && printf "CDP_API_KEY_SECRET_FILE=/app/secrets/cdp_secret_key\n" >> .env
+  else
+    cat >> .env <<EOF
 
-echo
-echo -e "${GREEN}Certbot finished. Configuring Nginx...${NC}"
+ENABLE_RATE_LIMITER=false
+ENABLE_X_402_USDC_DATA_EGRESS=false
+EOF
+  fi
 
-cat > /etc/nginx/sites-available/default <<EOF
+  chmod 600 .env
+  ok ".env written at ${INSTALL_DIR}/.env"
+}
+
+convert_key_material() {
+  local target="$1"
+  local expected_wallet="$2"
+  local converter
+  converter="$(mktemp)"
+
+  cat > "$converter" <<'PY'
+import hashlib
+import json
+import os
+import sys
+
+ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+P = 2**255 - 19
+L = 2**252 + 27742317777372353535851937790883648493
+
+def inv(x):
+    return pow(x, P - 2, P)
+
+D = (-121665 * inv(121666)) % P
+I = pow(2, (P - 1) // 4, P)
+
+def xrecover(y):
+    xx = (y * y - 1) * inv(D * y * y + 1)
+    x = pow(xx, (P + 3) // 8, P)
+    if (x * x - xx) % P != 0:
+        x = (x * I) % P
+    if x % 2 != 0:
+        x = P - x
+    return x
+
+BY = (4 * inv(5)) % P
+BX = xrecover(BY)
+B = (BX, BY)
+
+def edwards_add(p1, p2):
+    x1, y1 = p1
+    x2, y2 = p2
+    denom_x = inv(1 + D * x1 * x2 * y1 * y2)
+    denom_y = inv(1 - D * x1 * x2 * y1 * y2)
+    x3 = (x1 * y2 + x2 * y1) * denom_x
+    y3 = (y1 * y2 + x1 * x2) * denom_y
+    return (x3 % P, y3 % P)
+
+def scalarmult(point, scalar):
+    result = (0, 1)
+    addend = point
+    while scalar:
+        if scalar & 1:
+            result = edwards_add(result, addend)
+        addend = edwards_add(addend, addend)
+        scalar >>= 1
+    return result
+
+def encode_point(point):
+    x, y = point
+    value = y | ((x & 1) << 255)
+    return value.to_bytes(32, "little")
+
+def public_from_seed(seed):
+    digest = hashlib.sha512(seed).digest()
+    scalar = int.from_bytes(digest[:32], "little")
+    scalar &= (1 << 254) - 8
+    scalar |= (1 << 254)
+    return encode_point(scalarmult(B, scalar))
+
+def b58decode(text):
+    value = 0
+    for char in text:
+        value *= 58
+        index = ALPHABET.find(char)
+        if index == -1:
+            raise ValueError("invalid base58 character")
+        value += index
+    raw = value.to_bytes((value.bit_length() + 7) // 8, "big") if value else b""
+    pad = 0
+    for char in text:
+        if char == "1":
+            pad += 1
+        else:
+            break
+    return b"\0" * pad + raw
+
+def b58encode(raw):
+    value = int.from_bytes(raw, "big")
+    output = ""
+    while value:
+        value, rem = divmod(value, 58)
+        output = ALPHABET[rem] + output
+    pad = 0
+    for byte in raw:
+        if byte == 0:
+            pad += 1
+        else:
+            break
+    return "1" * pad + (output or "")
+
+def parse_material(text):
+    stripped = text.strip()
+    if not stripped:
+        raise ValueError("empty key material")
+    if stripped.startswith("["):
+        arr = json.loads(stripped)
+        if not isinstance(arr, list) or not all(isinstance(x, int) for x in arr):
+            raise ValueError("JSON keypair must be an array of numbers")
+        raw = bytes(arr)
+    else:
+        raw = b58decode("".join(stripped.split()))
+
+    if len(raw) == 64:
+        seed = raw[:32]
+        pub = raw[32:]
+        derived = public_from_seed(seed)
+        if pub != derived:
+            raise ValueError("64-byte secret key public half does not match derived public key")
+        return raw
+    if len(raw) == 32:
+        return raw + public_from_seed(raw)
+    raise ValueError(f"expected 32 or 64 bytes, got {len(raw)} bytes")
+
+def main():
+    target = sys.argv[1]
+    expected_wallet = sys.argv[2]
+    material = sys.stdin.read()
+    secret = parse_material(material)
+    address = b58encode(secret[32:])
+    if expected_wallet and address != expected_wallet:
+        raise SystemExit(
+            f"key belongs to {address}, but OBSERVER_WALLET is {expected_wallet}"
+        )
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    with open(target, "w", encoding="utf-8") as handle:
+        json.dump(list(secret), handle)
+        handle.write("\n")
+    os.chmod(target, 0o600)
+    print(f"saved Solana keypair JSON for {address}")
+
+if __name__ == "__main__":
+    main()
+PY
+
+  set +e
+  python3 "$converter" "$target" "$expected_wallet"
+  local status=$?
+  set -e
+  rm -f "$converter"
+  return "$status"
+}
+
+configure_wallet() {
+  log "[6/8] Observer wallet keyfile"
+  cd "$INSTALL_DIR"
+  mkdir -p wallets
+  chmod 700 wallets
+  local target="wallets/${OBSERVER_WALLET}.json"
+
+  if [[ -f "$target" ]]; then
+    chmod 600 "$target"
+    ok "Existing keyfile found: ${INSTALL_DIR}/${target}"
+    return
+  fi
+
+  echo "The observer expects a Solana keypair JSON file here:"
+  echo "  ${INSTALL_DIR}/${target}"
+  echo
+  echo "You can provide it in three ways:"
+  echo "  1) existing JSON file path on this server"
+  echo "  2) pasted Solana keypair JSON array"
+  echo "  3) pasted Solana exported private key/base58, converted automatically"
+  echo
+  echo "Do not paste seed phrase words."
+  echo
+
+  if confirm "Do you already have a Solana keypair JSON file" "n"; then
+    local source_path
+    source_path="$(prompt "Path on this server, blank to paste JSON content" "")"
+    if [[ -n "$source_path" ]]; then
+      [[ -f "$source_path" ]] || die "Keypair file not found: ${source_path}"
+      convert_key_material "${INSTALL_DIR}/${target}" "$OBSERVER_WALLET" < "$source_path"
+      ok "Keyfile installed: ${INSTALL_DIR}/${target}"
+      return
+    fi
+    echo "Paste the complete JSON array, then press ENTER and CTRL+D:"
+    convert_key_material "${INSTALL_DIR}/${target}" "$OBSERVER_WALLET"
+    ok "Keyfile installed: ${INSTALL_DIR}/${target}"
+  elif confirm "Paste exported Solana private key/base58 and convert it now" "n"; then
+    local private_key
+    printf "Paste exported Solana private key/base58 (hidden): " >&2
+    read -r -s private_key
+    printf "\n" >&2
+    [[ -n "$private_key" ]] || die "Private key was empty."
+    printf "%s" "$private_key" | convert_key_material "${INSTALL_DIR}/${target}" "$OBSERVER_WALLET"
+    unset private_key
+    ok "Private key converted to Solana keypair JSON: ${INSTALL_DIR}/${target}"
+  else
+    warn "Skipped keyfile. Gateway can serve traffic, but observer reports need ${INSTALL_DIR}/${target}."
+  fi
+}
+
+start_gateway() {
+  log "[7/8] Starting gateway"
+  cd "$INSTALL_DIR"
+  docker compose pull
+  docker compose up -d
+}
+
+configure_firewall_ssl_nginx() {
+  log "[8/8] Firewall, SSL, nginx"
+  ufw allow OpenSSH >/dev/null || true
+  ufw allow 80/tcp >/dev/null || true
+  ufw allow 443/tcp >/dev/null || true
+  ufw --force enable >/dev/null || true
+
+  echo
+  echo "Certbot will ask you to create DNS TXT records for:"
+  echo "  _acme-challenge.${DOMAIN}"
+  echo "Add the value in Namecheap, wait a few minutes, then press Enter in Certbot."
+  echo
+
+  if [[ -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" ]]; then
+    ok "Existing Let's Encrypt certificate found for ${DOMAIN}."
+  else
+    systemctl stop nginx >/dev/null 2>&1 || true
+    certbot certonly \
+      --manual \
+      --preferred-challenges dns \
+      --agree-tos \
+      --register-unsafely-without-email \
+      -d "${DOMAIN}" \
+      -d "*.${DOMAIN}"
+  fi
+
+  cat > /etc/nginx/sites-available/default <<EOF
 server {
     listen 80;
     listen [::]:80;
     server_name ${DOMAIN} *.${DOMAIN};
+
     location / {
         return 301 https://\$host\$request_uri;
     }
@@ -261,6 +599,11 @@ server {
     ssl_certificate /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
 
+    client_max_body_size 250m;
+    proxy_connect_timeout 75s;
+    proxy_send_timeout 300s;
+    proxy_read_timeout 300s;
+
     location / {
         proxy_pass http://localhost:3000;
         proxy_set_header Host \$host;
@@ -271,154 +614,149 @@ server {
         proxy_set_header X-AR-IO-Origin-Node-Release \$http_x_ar_io_origin_node_release;
         proxy_set_header X-AR-IO-Hops \$http_x_ar_io_hops;
     }
-    
-    location /grafana/ {
-        proxy_pass http://localhost:1024/grafana/;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
 }
 EOF
 
-echo "Restarting Nginx..."
-nginx -t && systemctl restart nginx
+  nginx -t
+  systemctl enable nginx >/dev/null 2>&1 || true
+  systemctl restart nginx
+  ok "nginx configured for https://${DOMAIN}"
+}
 
-echo "Finalizing gateway stack..."
-cd "${INSTALL_DIR}"
-docker compose down
-docker compose up -d
+write_helpers() {
+  log "Creating helper commands"
 
-###############################################################################
-# HELPER COMMANDS
-###############################################################################
-echo
-echo -e "${YELLOW}Creating helper commands...${NC}"
-
-# 1. UPDATE
-cat >/usr/local/bin/gateway-update <<EOF
+  cat > /usr/local/bin/gateway-update <<EOF
 #!/usr/bin/env bash
-echo -e "${YELLOW}Updating AR.IO Gateway...${NC}"
-cd ${INSTALL_DIR} || exit 1
-
-# 1. Durdur (Veri kaybetmeden)
-docker compose down
-
-# 2. Repo'yu güncelle (Main branch garantisi)
+set -euo pipefail
+cd ${INSTALL_DIR}
 git checkout main
-git pull
-
-# 3. Yeniden başlat ve Build et
-docker compose up -d --build
-
-echo -e "${GREEN}Update complete!${NC}"
+git pull --ff-only origin main
+docker compose pull
+docker compose up -d --force-recreate
+docker compose ps
 EOF
 
-# 2. RESTART
-cat >/usr/local/bin/gateway-restart <<EOF
+  cat > /usr/local/bin/gateway-restart <<EOF
 #!/usr/bin/env bash
-echo -e "${YELLOW}Stopping all services...${NC}"
-cd ${INSTALL_DIR} || exit 1
+set -euo pipefail
+cd ${INSTALL_DIR}
 docker compose down
-echo -e "${YELLOW}Starting all services...${NC}"
 docker compose up -d
-echo -e "${GREEN}Gateway has been fully restarted!${NC}"
+docker compose ps
 EOF
 
-# 3. LOGS
-cat >/usr/local/bin/gateway-logs <<EOF
+  cat > /usr/local/bin/gateway-logs <<EOF
 #!/usr/bin/env bash
-cd ${INSTALL_DIR} || exit 1
-docker compose logs -f --tail=100 core observer
+set -euo pipefail
+cd ${INSTALL_DIR}
+docker compose logs -f --tail=120 core observer envoy
 EOF
 
-# 4. STATUS
-cat >/usr/local/bin/gateway-status <<EOF
+  cat > /usr/local/bin/gateway-status <<EOF
 #!/usr/bin/env bash
-cd ${INSTALL_DIR} || exit 1
-echo -e "${CYAN}=== Docker Status ===${NC}"
+set -euo pipefail
+cd ${INSTALL_DIR}
+echo "=== Docker services ==="
 docker compose ps
 echo
-echo -e "${CYAN}=== Resources ===${NC}"
-docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}"
+echo "=== Resources ==="
+docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}"
+echo
+echo "=== Disk ==="
+df -h ${INSTALL_DIR}
 EOF
 
-# 5. RENEW SSL
-cat >/usr/local/bin/gateway-renew-cert <<EOF
+  cat > /usr/local/bin/gateway-check <<EOF
 #!/usr/bin/env bash
-echo -e "${YELLOW}Renewing SSL Certificate...${NC}"
+set -euo pipefail
+DOMAIN="${DOMAIN}"
+TX="${GATEWAY_TEST_TX}"
+echo "=== 1984 content test ==="
+curl -fsS "https://\${DOMAIN}/\${TX}" || true
+echo
+echo "=== /ar-io/info ==="
+curl -fsS "https://\${DOMAIN}/ar-io/info" | jq . || true
+echo
+echo "=== observer report ==="
+curl -fsS "https://\${DOMAIN}/ar-io/observer/reports/current" | jq . || true
+echo
+echo "=== local docker ==="
+cd ${INSTALL_DIR}
+docker compose ps
+EOF
+
+  cat > /usr/local/bin/gateway-x402-check <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd ${INSTALL_DIR}
+source .env
+echo "=== x402 / rate limiter env ==="
+docker compose exec core env | grep -E "^(ENABLE_RATE_LIMITER|RATE_LIMITER|ENABLE_X_402|X_402)" | sort || true
+echo
+echo "=== x402 / rate limiter metrics ==="
+curl -fsS http://localhost:3000/ar-io/__gateway_metrics | grep -Ei "rate_limit|token|x402|payment" || true
+echo
+echo "=== facilitator connectivity ==="
+curl -I --max-time 20 "\${X_402_USDC_FACILITATOR_URL:-https://facilitator.x402.rs}" || true
+echo
+echo "=== payment logs ==="
+docker compose logs core --tail=300 | grep -Ei "x402|payment|rate limit" || true
+EOF
+
+  cat > /usr/local/bin/gateway-renew-cert <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
 systemctl stop nginx || true
-certbot certonly --manual --preferred-challenges dns --agree-tos --no-eff-email -m "${CERTBOT_EMAIL}" -d ${DOMAIN} -d *.${DOMAIN}
-nginx -t && systemctl restart nginx
-cd ${INSTALL_DIR} || exit 1
-docker compose up -d --force-recreate
-echo -e "${GREEN}SSL Renewed.${NC}"
+certbot certonly --manual --preferred-challenges dns --agree-tos --register-unsafely-without-email -d ${DOMAIN} -d "*.${DOMAIN}"
+nginx -t
+systemctl restart nginx
 EOF
 
-# 6. HEALTH CHECK (Simple Link Display)
-cat >/usr/local/bin/gateway-check <<EOF
-#!/usr/bin/env bash
-# .env dosyasından domaini otomatik çeker
-if [ -f "${INSTALL_DIR}/.env" ]; then
-    source "${INSTALL_DIR}/.env"
-    DOMAIN="\$ARNS_ROOT_HOST"
-else
-    echo "Error: .env file not found."
-    exit 1
-fi
+  chmod +x /usr/local/bin/gateway-update \
+    /usr/local/bin/gateway-restart \
+    /usr/local/bin/gateway-logs \
+    /usr/local/bin/gateway-status \
+    /usr/local/bin/gateway-check \
+    /usr/local/bin/gateway-x402-check \
+    /usr/local/bin/gateway-renew-cert
+}
 
-echo -e "${YELLOW}Waiting 10 seconds before checking health...${NC}"
-# Geri Sayım
-for i in {10..1}; do echo -n "\$i... " && sleep 1; done
-echo
-echo
+finish() {
+  echo
+  echo -e "${GREEN}Installation finished.${NC}"
+  echo "Gateway URL: https://${DOMAIN}"
+  echo
+  echo "Useful commands:"
+  echo "  gateway-check"
+  echo "  gateway-status"
+  echo "  gateway-logs"
+  echo "  gateway-update"
+  echo "  gateway-restart"
+  echo "  gateway-x402-check"
+  echo "  gateway-renew-cert"
+  echo
+  echo "Important:"
+  echo "  This installer did not run platform registration commands."
+  echo "  If observer reports matter, make sure this file exists:"
+  echo "  ${INSTALL_DIR}/wallets/${OBSERVER_WALLET}.json"
+  echo
+  /usr/local/bin/gateway-check || true
+}
 
-echo -e "${CYAN}>>> 1. Transaction Data Test:${NC}"
-echo "Please open the link below in your browser."
-echo "If you see '1984', your gateway is working perfectly!"
-echo
-echo -e "${GREEN}https://\$DOMAIN/3lyxgbgEvqNSvJrTX2J7CfRychUD5KClFhhVLyTPNCQ${NC}"
-echo
+main() {
+  require_root
+  header
+  collect_config
+  install_packages
+  install_docker
+  clone_node
+  write_env
+  configure_wallet
+  start_gateway
+  configure_firewall_ssl_nginx
+  write_helpers
+  finish
+}
 
-echo -e "${CYAN}>>> 2. Checking Health (/ar-io/healthcheck):${NC}"
-curl -s --max-time 20 "https://\$DOMAIN/ar-io/healthcheck" | jq . || echo -e "${RED}Core Service not ready yet (Timeout/Error)${NC}"
-echo
-
-echo -e "${CYAN}>>> 3. Checking Node Info (/ar-io/info):${NC}"
-curl -s --max-time 20 "https://\$DOMAIN/ar-io/info" | jq . || echo -e "${RED}Core Service not ready yet (Timeout/Error)${NC}"
-echo
-
-echo -e "${CYAN}>>> 4. Checking Observer (/ar-io/observer/info):${NC}"
-curl -s --max-time 20 "https://\$DOMAIN/ar-io/observer/info" | jq . || echo -e "${RED}Observer not ready yet${NC}"
-echo
-EOF
-
-chmod +x /usr/local/bin/gateway-update
-chmod +x /usr/local/bin/gateway-restart
-chmod +x /usr/local/bin/gateway-logs
-chmod +x /usr/local/bin/gateway-status
-chmod +x /usr/local/bin/gateway-renew-cert
-chmod +x /usr/local/bin/gateway-check
-
-echo
-echo -e "${GREEN}Installation finished successfully!${NC}"
-# İsteğin üzerine süre 10 saniye yapıldı
-echo -e "${YELLOW}Waiting 10 seconds for Core Service to initialize...${NC}"
-sleep 10
-
-# Kurulum sonunda otomatik test
-/usr/local/bin/gateway-check
-
-echo
-echo "------------------------------------------------------------------"
-echo "Gateway URL     : https://${DOMAIN}"
-echo "------------------------------------------------------------------"
-echo -e "${CYAN}COMMAND LIST:${NC}"
-echo "  gateway-update   : Update node safely"
-echo "  gateway-restart  : Full Stop & Start (Clean)"
-echo "  gateway-check    : Show Test Links & Status"
-echo "  gateway-status   : Check Docker resources"
-echo "  gateway-logs     : View live logs"
-echo "------------------------------------------------------------------"
-echo "Welcome to the AR.IO Network."
+main "$@"
