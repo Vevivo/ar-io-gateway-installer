@@ -847,13 +847,27 @@ set -euo pipefail
 DOMAIN="${DOMAIN}"
 TX="${GATEWAY_TEST_TX}"
 echo "=== 1984 content test ==="
-CONTENT="\$(curl -fsSL "https://\${DOMAIN}/\${TX}" 2>/dev/null || true)"
-if [[ "\$CONTENT" == "1984" ]]; then
+CONTENT_TMP="\$(mktemp)"
+ERR_TMP="\$(mktemp)"
+META="\$(curl -sS -L --max-time 45 -o "\${CONTENT_TMP}" -w "%{http_code}|%{content_type}|%{url_effective}" "https://\${DOMAIN}/\${TX}" 2>"\${ERR_TMP}" || true)"
+HTTP_CODE="\${META%%|*}"
+REST="\${META#*|}"
+CONTENT_TYPE="\${REST%%|*}"
+FINAL_URL="\${REST#*|}"
+if LC_ALL=C grep -a -qx "1984" "\${CONTENT_TMP}"; then
   echo "1984"
 else
   echo "Content test is not ready yet, or returned a redirect/cache response."
+  [[ -n "\${HTTP_CODE}" ]] && echo "HTTP: \${HTTP_CODE}"
+  [[ -n "\${CONTENT_TYPE}" ]] && echo "Content-Type: \${CONTENT_TYPE}"
+  [[ -n "\${FINAL_URL}" ]] && echo "Final URL: \${FINAL_URL}"
+  if [[ -s "\${ERR_TMP}" ]]; then
+    echo "curl:"
+    sed 's/^/  /' "\${ERR_TMP}"
+  fi
   echo "Try again in a few minutes: curl -L https://\${DOMAIN}/\${TX}"
 fi
+rm -f "\${CONTENT_TMP}" "\${ERR_TMP}"
 echo
 echo "=== /ar-io/info ==="
 curl -fsS "https://\${DOMAIN}/ar-io/info" | jq '{release,wallet,programIds}' || true
