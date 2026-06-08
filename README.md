@@ -1,7 +1,7 @@
 bash <(wget -qO- https://raw.githubusercontent.com/Vevivo/ar-io-gateway-installer/main/install-gateway.sh)
 
 
-cd /opt/ar-io-gateway
+cd /opt/ar-io-node
 
 gateway-check	En Önemlisi! Node'unuzun sağlığını kontrol eder ve test linkini verir.
 
