@@ -126,19 +126,25 @@ collect_config() {
   DOMAIN="$(normalize_domain "$(prompt "Gateway domain" "$DOMAIN")")"
   [[ -n "$DOMAIN" ]] || die "Domain cannot be empty."
 
-  AR_IO_WALLET="$(prompt "Solana gateway wallet / AR_IO_WALLET" "$AR_IO_WALLET")"
+  AR_IO_WALLET="$(prompt "Main Solana gateway wallet address" "$AR_IO_WALLET")"
   [[ -n "$AR_IO_WALLET" ]] || die "AR_IO_WALLET cannot be empty."
 
   if [[ -z "$OBSERVER_WALLET" ]]; then
     OBSERVER_WALLET="$AR_IO_WALLET"
   fi
-  echo "Observer wallet: ${OBSERVER_WALLET} (same as AR_IO_WALLET)"
+  OBSERVER_WALLET="$(prompt "Observer Solana wallet address, Enter = same as main wallet" "$OBSERVER_WALLET")"
+  [[ -n "$OBSERVER_WALLET" ]] || die "OBSERVER_WALLET cannot be empty."
+  if [[ "$OBSERVER_WALLET" == "$AR_IO_WALLET" ]]; then
+    echo "Observer wallet: same as main Solana gateway wallet."
+  else
+    echo "Observer wallet: ${OBSERVER_WALLET}"
+  fi
 
   echo "GRAPHQL_HOST: ${GRAPHQL_HOST}"
   echo "START_HEIGHT: ${START_HEIGHT}"
 
   REPORT_DATA_SINK=""
-  if confirm "Use AR for observer report uploads instead of default Turbo Credits" "n"; then
+  if confirm "Observer report uploads use Turbo Credits by default. Use AR tokens instead" "n"; then
     REPORT_DATA_SINK="arweave"
   fi
 
@@ -356,9 +362,11 @@ convert_key_material() {
 
   cat > "$converter" <<'PY'
 import hashlib
+import hmac
 import json
 import os
 import sys
+import unicodedata
 
 ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 P = 2**255 - 19
@@ -414,6 +422,40 @@ def public_from_seed(seed):
     scalar |= (1 << 254)
     return encode_point(scalarmult(B, scalar))
 
+def bip39_seed(mnemonic, passphrase=""):
+    mnemonic = unicodedata.normalize("NFKD", mnemonic.strip())
+    salt = "mnemonic" + unicodedata.normalize("NFKD", passphrase)
+    return hashlib.pbkdf2_hmac(
+        "sha512",
+        mnemonic.encode("utf-8"),
+        salt.encode("utf-8"),
+        2048,
+        dklen=64,
+    )
+
+def slip10_master(seed):
+    digest = hmac.new(b"ed25519 seed", seed, hashlib.sha512).digest()
+    return digest[:32], digest[32:]
+
+def slip10_child(key, chain_code, index):
+    hardened = index | 0x80000000
+    data = b"\x00" + key + hardened.to_bytes(4, "big")
+    digest = hmac.new(chain_code, data, hashlib.sha512).digest()
+    return digest[:32], digest[32:]
+
+def derive_path(seed, path):
+    if not path.startswith("m/"):
+        raise ValueError("path must start with m/")
+    key, chain = slip10_master(seed)
+    for part in path[2:].split("/"):
+        if not part:
+            continue
+        if not part.endswith("'"):
+            raise ValueError("only hardened ed25519 derivation path components are supported")
+        index = int(part[:-1])
+        key, chain = slip10_child(key, chain, index)
+    return key
+
 def b58decode(text):
     value = 0
     for char in text:
@@ -454,6 +496,26 @@ def parse_material(text):
         if not isinstance(arr, list) or not all(isinstance(x, int) for x in arr):
             raise ValueError("JSON keypair must be an array of numbers")
         raw = bytes(arr)
+    elif len(stripped.split()) in (12, 15, 18, 21, 24):
+        seed = bip39_seed(" ".join(stripped.split()))
+        expected = os.environ.get("EXPECTED_WALLET", "")
+        candidates = []
+        for index in range(20):
+            candidates.append((f"m/44'/501'/{index}'/0'", derive_path(seed, f"m/44'/501'/{index}'/0'")))
+            candidates.append((f"m/44'/501'/{index}'", derive_path(seed, f"m/44'/501'/{index}'")))
+            candidates.append((f"m/501'/{index}'/0'/0'", derive_path(seed, f"m/501'/{index}'/0'/0'")))
+        if expected:
+            for path, child_seed in candidates:
+                secret = child_seed + public_from_seed(child_seed)
+                if b58encode(secret[32:]) == expected:
+                    print(f"matched mnemonic derivation path: {path}", file=sys.stderr)
+                    return secret
+            raise ValueError(
+                "mnemonic did not derive the expected wallet address in the common Phantom paths. "
+                "Export the private key for the exact Phantom account and use that instead."
+            )
+        child_seed = candidates[0][1]
+        return child_seed + public_from_seed(child_seed)
     else:
         raw = b58decode("".join(stripped.split()))
 
@@ -471,6 +533,8 @@ def parse_material(text):
 def main():
     target = sys.argv[1]
     expected_wallet = sys.argv[2]
+    if expected_wallet:
+        os.environ["EXPECTED_WALLET"] = expected_wallet
     material = sys.stdin.read()
     secret = parse_material(material)
     address = b58encode(secret[32:])
@@ -516,9 +580,10 @@ configure_wallet() {
   echo "You can provide it in three ways:"
   echo "  1) existing JSON file path on this server"
   echo "  2) pasted Solana keypair JSON array"
-  echo "  3) pasted Solana exported private key/base58, converted automatically"
+  echo "  3) pasted Phantom/Solana seed phrase, or exported private key/base58"
   echo
-  echo "Do not paste seed phrase words."
+  echo "Seed phrase/private key input is visible on purpose so you can catch typos."
+  echo "Use this only on your own secure terminal."
   echo
 
   if confirm "Do you already have a Solana keypair JSON file" "n"; then
@@ -533,10 +598,21 @@ configure_wallet() {
     echo "Paste the complete JSON array, then press ENTER and CTRL+D:"
     convert_key_material "${INSTALL_DIR}/${target}" "$OBSERVER_WALLET"
     ok "Keyfile installed: ${INSTALL_DIR}/${target}"
+  elif confirm "Do you have Phantom/Solana seed phrase words" "n"; then
+    local mnemonic
+    echo "Paste seed phrase words visibly on one line, then press Enter."
+    echo "The installer will try common Phantom Solana paths and only save the key if the public address matches:"
+    echo "  ${OBSERVER_WALLET}"
+    printf "Seed phrase: " >&2
+    read -r mnemonic
+    [[ -n "$mnemonic" ]] || die "Seed phrase was empty."
+    printf "%s" "$mnemonic" | convert_key_material "${INSTALL_DIR}/${target}" "$OBSERVER_WALLET"
+    unset mnemonic
+    ok "Seed phrase converted to Solana keypair JSON: ${INSTALL_DIR}/${target}"
   elif confirm "Paste exported Solana private key/base58 and convert it now" "n"; then
     local private_key
-    printf "Paste exported Solana private key/base58 (hidden): " >&2
-    read -r -s private_key
+    printf "Paste exported Solana private key/base58 visibly: " >&2
+    read -r private_key
     printf "\n" >&2
     [[ -n "$private_key" ]] || die "Private key was empty."
     printf "%s" "$private_key" | convert_key_material "${INSTALL_DIR}/${target}" "$OBSERVER_WALLET"
