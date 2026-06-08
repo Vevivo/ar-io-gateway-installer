@@ -15,7 +15,14 @@ OBSERVER_WALLET="${OBSERVER_WALLET:-}"
 GRAPHQL_HOST="${GRAPHQL_HOST:-turbo-gateway.com}"
 GRAPHQL_PORT="${GRAPHQL_PORT:-443}"
 START_HEIGHT="${START_HEIGHT:-1000000}"
+SOLANA_RPC_URL="${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}"
 GATEWAY_TEST_TX="3lyxgbgEvqNSvJrTX2J7CfRychUD5KClFhhVLyTPNCQ"
+ENABLE_EPOCH_CRANKING="false"
+
+ARIO_CORE_PROGRAM_ID="73YoECm6NKXpVRoe5f1Q9BcP5DJGPFUjnFy6AxBE5Nvh"
+ARIO_GAR_PROGRAM_ID="89fNiiwgpFSPHKuqfNUkgYTYjtAJAhyqHjXmgXeppGpf"
+ARIO_ARNS_PROGRAM_ID="2yCUx5edFvUrkibYaUa2ZXWyx9kuJkS8CwyzsgHPWdZZ"
+ARIO_ANT_PROGRAM_ID="2MWexMHfMhGJwMHv9Qm9YAVCqjUFUJwDJAysW4oCUGk5"
 
 X402_ENABLED="false"
 X402_NETWORK="base"
@@ -143,9 +150,19 @@ collect_config() {
   echo "GRAPHQL_HOST: ${GRAPHQL_HOST}"
   echo "START_HEIGHT: ${START_HEIGHT}"
 
+  SOLANA_RPC_URL="$(prompt "Solana RPC URL, Enter = public mainnet RPC" "$SOLANA_RPC_URL")"
+  if [[ "$SOLANA_RPC_URL" == "https://api.mainnet-beta.solana.com" ]]; then
+    warn "Public Solana RPC is rate-limited. A premium RPC from Helius, Triton, or QuickNode is better for rewards."
+  fi
+
   REPORT_DATA_SINK=""
   if confirm "Observer report uploads use Turbo Credits by default. Use AR tokens instead" "n"; then
     REPORT_DATA_SINK="arweave"
+  fi
+
+  if confirm "Enable optional epoch cranking with the main Solana wallet" "n"; then
+    ENABLE_EPOCH_CRANKING="true"
+    warn "Epoch cranking spends a small amount of SOL and requires the main wallet keypair on the server."
   fi
 
   if confirm "Enable optional x402 USDC data egress payments" "n"; then
@@ -266,12 +283,18 @@ RUN_OBSERVER=true
 ARNS_ROOT_HOST=${DOMAIN}
 AR_IO_WALLET=${AR_IO_WALLET}
 OBSERVER_WALLET=${OBSERVER_WALLET}
-WALLETS_PATH=./wallets
+SOLANA_RPC_URL=${SOLANA_RPC_URL}
+OBSERVER_KEYPAIR_PATH=/app/wallets/${OBSERVER_WALLET}.json
+ENABLE_EPOCH_CRANKING=${ENABLE_EPOCH_CRANKING}
+
+ARIO_CORE_PROGRAM_ID=${ARIO_CORE_PROGRAM_ID}
+ARIO_GAR_PROGRAM_ID=${ARIO_GAR_PROGRAM_ID}
+ARIO_ARNS_PROGRAM_ID=${ARIO_ARNS_PROGRAM_ID}
+ARIO_ANT_PROGRAM_ID=${ARIO_ANT_PROGRAM_ID}
 
 SANDBOX_PROTOCOL=https
 HTTPSIG_ENABLED=true
 HTTPSIG_BIND_REQUEST=true
-HTTPSIG_UPLOAD_ATTESTATION=true
 
 ARNS_RESOLVER_PRIORITY_ORDER=on-demand,gateway
 ARNS_COMPOSITE_RESOLVER_TIMEOUT_MS=3000
@@ -294,6 +317,10 @@ ANS104_DATA_INDEXER_QUEUE_SIZE=500000
 
 RUN_AUTOHEAL=true
 EOF
+
+  if [[ "$ENABLE_EPOCH_CRANKING" == "true" ]]; then
+    printf "SOLANA_KEYPAIR_PATH=/app/wallets/%s.json\n" "$AR_IO_WALLET" >> .env
+  fi
 
   if [[ "$REPORT_DATA_SINK" == "arweave" ]]; then
     printf "REPORT_DATA_SINK=arweave\n" >> .env
@@ -562,11 +589,13 @@ PY
 }
 
 configure_wallet() {
-  log "[6/8] Observer wallet keyfile"
+  local role_label="$1"
+  local wallet_address="$2"
+  log "[6/8] ${role_label} Solana keyfile"
   cd "$INSTALL_DIR"
   mkdir -p wallets
   chmod 700 wallets
-  local target="wallets/${OBSERVER_WALLET}.json"
+  local target="wallets/${wallet_address}.json"
 
   if [[ -f "$target" ]]; then
     chmod 600 "$target"
@@ -574,7 +603,7 @@ configure_wallet() {
     return
   fi
 
-  echo "The observer expects a Solana keypair JSON file here:"
+  echo "The ${role_label} expects a Solana keypair JSON file here:"
   echo "  ${INSTALL_DIR}/${target}"
   echo
   echo "You can provide it in three ways:"
@@ -591,22 +620,22 @@ configure_wallet() {
     source_path="$(prompt "Path on this server, blank to paste JSON content" "")"
     if [[ -n "$source_path" ]]; then
       [[ -f "$source_path" ]] || die "Keypair file not found: ${source_path}"
-      convert_key_material "${INSTALL_DIR}/${target}" "$OBSERVER_WALLET" < "$source_path"
+      convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address" < "$source_path"
       ok "Keyfile installed: ${INSTALL_DIR}/${target}"
       return
     fi
     echo "Paste the complete JSON array, then press ENTER and CTRL+D:"
-    convert_key_material "${INSTALL_DIR}/${target}" "$OBSERVER_WALLET"
+    convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address"
     ok "Keyfile installed: ${INSTALL_DIR}/${target}"
   elif confirm "Do you have Phantom/Solana seed phrase words" "n"; then
     local mnemonic
     echo "Paste seed phrase words visibly on one line, then press Enter."
     echo "The installer will try common Phantom Solana paths and only save the key if the public address matches:"
-    echo "  ${OBSERVER_WALLET}"
+    echo "  ${wallet_address}"
     printf "Seed phrase: " >&2
     read -r mnemonic
     [[ -n "$mnemonic" ]] || die "Seed phrase was empty."
-    printf "%s" "$mnemonic" | convert_key_material "${INSTALL_DIR}/${target}" "$OBSERVER_WALLET"
+    printf "%s" "$mnemonic" | convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address"
     unset mnemonic
     ok "Seed phrase converted to Solana keypair JSON: ${INSTALL_DIR}/${target}"
   elif confirm "Paste exported Solana private key/base58 and convert it now" "n"; then
@@ -615,11 +644,11 @@ configure_wallet() {
     read -r private_key
     printf "\n" >&2
     [[ -n "$private_key" ]] || die "Private key was empty."
-    printf "%s" "$private_key" | convert_key_material "${INSTALL_DIR}/${target}" "$OBSERVER_WALLET"
+    printf "%s" "$private_key" | convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address"
     unset private_key
     ok "Private key converted to Solana keypair JSON: ${INSTALL_DIR}/${target}"
   else
-    warn "Skipped keyfile. Gateway can serve traffic, but observer reports need ${INSTALL_DIR}/${target}."
+    warn "Skipped keyfile. Gateway can serve traffic, but ${role_label} protocol actions need ${INSTALL_DIR}/${target}."
   fi
 }
 
@@ -752,7 +781,7 @@ echo "=== 1984 content test ==="
 curl -fsS "https://\${DOMAIN}/\${TX}" || true
 echo
 echo "=== /ar-io/info ==="
-curl -fsS "https://\${DOMAIN}/ar-io/info" | jq . || true
+curl -fsS "https://\${DOMAIN}/ar-io/info" | jq '{release,wallet,programIds}' || true
 echo
 echo "=== observer report ==="
 curl -fsS "https://\${DOMAIN}/ar-io/observer/reports/current" | jq . || true
@@ -828,7 +857,10 @@ main() {
   install_docker
   clone_node
   write_env
-  configure_wallet
+  configure_wallet "observer" "$OBSERVER_WALLET"
+  if [[ "$ENABLE_EPOCH_CRANKING" == "true" && "$AR_IO_WALLET" != "$OBSERVER_WALLET" ]]; then
+    configure_wallet "main/operator cranking" "$AR_IO_WALLET"
+  fi
   start_gateway
   configure_firewall_ssl_nginx
   write_helpers
