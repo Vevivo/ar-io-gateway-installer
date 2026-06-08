@@ -150,19 +150,19 @@ collect_config() {
   echo "GRAPHQL_HOST: ${GRAPHQL_HOST}"
   echo "START_HEIGHT: ${START_HEIGHT}"
 
+  echo
+  warn "Public Solana RPC is rate-limited. For reward reliability, use Helius, Triton, QuickNode, or another premium RPC if you have one."
   SOLANA_RPC_URL="$(prompt "Solana RPC URL, Enter = public mainnet RPC" "$SOLANA_RPC_URL")"
-  if [[ "$SOLANA_RPC_URL" == "https://api.mainnet-beta.solana.com" ]]; then
-    warn "Public Solana RPC is rate-limited. A premium RPC from Helius, Triton, or QuickNode is better for rewards."
-  fi
 
   REPORT_DATA_SINK=""
   if confirm "Observer report uploads use Turbo Credits by default. Use AR tokens instead" "n"; then
     REPORT_DATA_SINK="arweave"
   fi
 
+  echo
+  warn "Epoch cranking is optional. It spends a small amount of SOL and requires the main wallet keypair on the server."
   if confirm "Enable optional epoch cranking with the main Solana wallet" "n"; then
     ENABLE_EPOCH_CRANKING="true"
-    warn "Epoch cranking spends a small amount of SOL and requires the main wallet keypair on the server."
   fi
 
   if confirm "Enable optional x402 USDC data egress payments" "n"; then
@@ -588,6 +588,16 @@ PY
   return "$status"
 }
 
+try_convert_key_material() {
+  local target="$1"
+  local expected_wallet="$2"
+  set +e
+  convert_key_material "$target" "$expected_wallet"
+  local status=$?
+  set -e
+  return "$status"
+}
+
 configure_wallet() {
   local role_label="$1"
   local wallet_address="$2"
@@ -615,41 +625,84 @@ configure_wallet() {
   echo "Use this only on your own secure terminal."
   echo
 
-  if confirm "Do you already have a Solana keypair JSON file" "n"; then
-    local source_path
-    source_path="$(prompt "Path on this server, blank to paste JSON content" "")"
-    if [[ -n "$source_path" ]]; then
-      [[ -f "$source_path" ]] || die "Keypair file not found: ${source_path}"
-      convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address" < "$source_path"
-      ok "Keyfile installed: ${INSTALL_DIR}/${target}"
+  while true; do
+    if confirm "Do you already have a Solana keypair JSON file" "n"; then
+      local source_path
+      source_path="$(prompt "Path on this server, blank to paste JSON content" "")"
+      if [[ -n "$source_path" ]]; then
+        if [[ ! -f "$source_path" ]]; then
+          warn "Keypair file not found: ${source_path}"
+          confirm "Try the ${role_label} keyfile step again" "y" && continue
+          warn "Skipped keyfile. You can add it later at ${INSTALL_DIR}/${target}."
+          return
+        fi
+        if try_convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address" < "$source_path"; then
+          ok "Keyfile installed: ${INSTALL_DIR}/${target}"
+          return
+        fi
+        warn "That key did not match ${wallet_address}, or it was not valid."
+        confirm "Try the ${role_label} keyfile step again" "y" && continue
+        warn "Skipped keyfile. You can add it later at ${INSTALL_DIR}/${target}."
+        return
+      fi
+      echo "Paste the complete JSON array, then press ENTER and CTRL+D:"
+      if try_convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address"; then
+        ok "Keyfile installed: ${INSTALL_DIR}/${target}"
+        return
+      fi
+      warn "That JSON did not match ${wallet_address}, or it was not valid."
+      confirm "Try the ${role_label} keyfile step again" "y" && continue
+      warn "Skipped keyfile. You can add it later at ${INSTALL_DIR}/${target}."
+      return
+    elif confirm "Do you have Phantom/Solana seed phrase words" "n"; then
+      local mnemonic
+      echo "Paste seed phrase words visibly on one line, then press Enter."
+      echo "The installer will try common Phantom Solana paths and only save the key if the public address matches:"
+      echo "  ${wallet_address}"
+      printf "Seed phrase: " >&2
+      read -r mnemonic
+      if [[ -z "$mnemonic" ]]; then
+        warn "Seed phrase was empty."
+        confirm "Try the ${role_label} keyfile step again" "y" && continue
+        warn "Skipped keyfile. You can add it later at ${INSTALL_DIR}/${target}."
+        return
+      fi
+      if printf "%s" "$mnemonic" | try_convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address"; then
+        unset mnemonic
+        ok "Seed phrase converted to Solana keypair JSON: ${INSTALL_DIR}/${target}"
+        return
+      fi
+      unset mnemonic
+      warn "Seed phrase did not derive ${wallet_address}. Check spelling/order or use exported private key."
+      confirm "Try the ${role_label} keyfile step again" "y" && continue
+      warn "Skipped keyfile. You can add it later at ${INSTALL_DIR}/${target}."
+      return
+    elif confirm "Paste exported Solana private key/base58 and convert it now" "n"; then
+      local private_key
+      printf "Paste exported Solana private key/base58 visibly: " >&2
+      read -r private_key
+      printf "\n" >&2
+      if [[ -z "$private_key" ]]; then
+        warn "Private key was empty."
+        confirm "Try the ${role_label} keyfile step again" "y" && continue
+        warn "Skipped keyfile. You can add it later at ${INSTALL_DIR}/${target}."
+        return
+      fi
+      if printf "%s" "$private_key" | try_convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address"; then
+        unset private_key
+        ok "Private key converted to Solana keypair JSON: ${INSTALL_DIR}/${target}"
+        return
+      fi
+      unset private_key
+      warn "Private key did not match ${wallet_address}, or it was not valid."
+      confirm "Try the ${role_label} keyfile step again" "y" && continue
+      warn "Skipped keyfile. You can add it later at ${INSTALL_DIR}/${target}."
+      return
+    else
+      warn "Skipped keyfile. Gateway can serve traffic, but ${role_label} protocol actions need ${INSTALL_DIR}/${target}."
       return
     fi
-    echo "Paste the complete JSON array, then press ENTER and CTRL+D:"
-    convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address"
-    ok "Keyfile installed: ${INSTALL_DIR}/${target}"
-  elif confirm "Do you have Phantom/Solana seed phrase words" "n"; then
-    local mnemonic
-    echo "Paste seed phrase words visibly on one line, then press Enter."
-    echo "The installer will try common Phantom Solana paths and only save the key if the public address matches:"
-    echo "  ${wallet_address}"
-    printf "Seed phrase: " >&2
-    read -r mnemonic
-    [[ -n "$mnemonic" ]] || die "Seed phrase was empty."
-    printf "%s" "$mnemonic" | convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address"
-    unset mnemonic
-    ok "Seed phrase converted to Solana keypair JSON: ${INSTALL_DIR}/${target}"
-  elif confirm "Paste exported Solana private key/base58 and convert it now" "n"; then
-    local private_key
-    printf "Paste exported Solana private key/base58 visibly: " >&2
-    read -r private_key
-    printf "\n" >&2
-    [[ -n "$private_key" ]] || die "Private key was empty."
-    printf "%s" "$private_key" | convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address"
-    unset private_key
-    ok "Private key converted to Solana keypair JSON: ${INSTALL_DIR}/${target}"
-  else
-    warn "Skipped keyfile. Gateway can serve traffic, but ${role_label} protocol actions need ${INSTALL_DIR}/${target}."
-  fi
+  done
 }
 
 start_gateway() {
