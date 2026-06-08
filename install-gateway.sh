@@ -642,8 +642,8 @@ configure_wallet() {
   echo "  ${INSTALL_DIR}/${target}"
   echo
   echo "You can provide it in three ways:"
-  echo "  1) existing JSON file path on this server"
-  echo "  2) pasted Solana keypair JSON array"
+  echo "  1) existing JSON file path on this server, like /root/id.json"
+  echo "  2) pasted Solana keypair JSON array, like [192,15,...,17]"
   echo "  3) pasted Phantom/Solana seed phrase, or exported private key/base58"
   echo
   echo "Seed phrase/private key input is visible on purpose so you can catch typos."
@@ -651,21 +651,29 @@ configure_wallet() {
   echo
 
   while true; do
-    if confirm "Do you already have a Solana keypair JSON file" "n"; then
-      local source_path
-      source_path="$(prompt "Path on this server, blank to paste JSON content" "")"
-      if [[ -n "$source_path" ]]; then
-        if [[ ! -f "$source_path" ]]; then
-          warn "Keypair file not found: ${source_path}"
+    if confirm "Do you already have a Solana keypair JSON file or JSON array" "n"; then
+      local keypair_input
+      keypair_input="$(prompt "Path, pasted JSON array, or private key. Blank = multi-line paste" "")"
+      if [[ -n "$keypair_input" ]]; then
+        if [[ -f "$keypair_input" ]]; then
+          if try_convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address" < "$keypair_input"; then
+            ok "Keyfile installed: ${INSTALL_DIR}/${target}"
+            return
+          fi
+          warn "That key did not match ${wallet_address}, or it was not valid."
           confirm "Try the ${role_label} keyfile step again" "y" && continue
           warn "Skipped keyfile. You can add it later at ${INSTALL_DIR}/${target}."
           return
         fi
-        if try_convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address" < "$source_path"; then
+        if printf "%s" "$keypair_input" | try_convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address"; then
           ok "Keyfile installed: ${INSTALL_DIR}/${target}"
           return
         fi
-        warn "That key did not match ${wallet_address}, or it was not valid."
+        if [[ "$keypair_input" == /* || "$keypair_input" == ./* || "$keypair_input" == *.json ]]; then
+          warn "Keypair file not found or invalid: ${keypair_input}"
+        else
+          warn "That pasted keypair/private key did not match ${wallet_address}, or it was not valid."
+        fi
         confirm "Try the ${role_label} keyfile step again" "y" && continue
         warn "Skipped keyfile. You can add it later at ${INSTALL_DIR}/${target}."
         return
