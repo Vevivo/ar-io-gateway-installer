@@ -95,6 +95,21 @@ is_evm_address() {
   [[ "$1" =~ ^0x[0-9a-fA-F]{40}$ ]]
 }
 
+normalize_solana_rpc_url() {
+  local value="$1"
+  if [[ "$value" =~ ^[0-9a-fA-F-]{32,}$ ]]; then
+    warn "That looks like a Helius API key, not a full RPC URL. Expanding it to the Helius mainnet endpoint."
+    printf "https://mainnet.helius-rpc.com/?api-key=%s" "$value"
+    return
+  fi
+  printf "%s" "$value"
+}
+
+validate_solana_rpc_url() {
+  local value="$1"
+  [[ "$value" =~ ^https?:// ]] || die "Solana RPC URL must start with https:// or http://. Example: https://mainnet.helius-rpc.com/?api-key=YOUR_KEY"
+}
+
 require_root() {
   [[ "$(id -u)" -eq 0 ]] || die "Please run as root: sudo bash install-gateway.sh"
 }
@@ -153,6 +168,8 @@ collect_config() {
   echo
   warn "Public Solana RPC is rate-limited. For reward reliability, use Helius, Triton, QuickNode, or another premium RPC if you have one."
   SOLANA_RPC_URL="$(prompt "Solana RPC URL, Enter = public mainnet RPC" "$SOLANA_RPC_URL")"
+  SOLANA_RPC_URL="$(normalize_solana_rpc_url "$SOLANA_RPC_URL")"
+  validate_solana_rpc_url "$SOLANA_RPC_URL"
 
   REPORT_DATA_SINK=""
   if confirm "Observer report uploads use Turbo Credits by default. Use AR tokens instead" "n"; then
@@ -299,7 +316,6 @@ HTTPSIG_BIND_REQUEST=true
 ARNS_RESOLVER_PRIORITY_ORDER=on-demand,gateway
 ARNS_COMPOSITE_RESOLVER_TIMEOUT_MS=3000
 ARNS_CACHE_TTL_MS=3600000
-ON_DEMAND_RETRIEVAL_ORDER=trusted-gateways,ar-io-network,chunks-offset-aware,tx-data
 TRUSTED_GATEWAYS_REQUEST_TIMEOUT_MS=10000
 GRAPHQL_ON_DEMAND_RESOLUTION_ENABLED=true
 GRAPHQL_ON_DEMAND_RESOLUTION_TIMEOUT_MS=5000
@@ -831,13 +847,22 @@ set -euo pipefail
 DOMAIN="${DOMAIN}"
 TX="${GATEWAY_TEST_TX}"
 echo "=== 1984 content test ==="
-curl -fsS "https://\${DOMAIN}/\${TX}" || true
+CONTENT="\$(curl -fsSL "https://\${DOMAIN}/\${TX}" 2>/dev/null || true)"
+if [[ "\$CONTENT" == "1984" ]]; then
+  echo "1984"
+else
+  echo "Content test is not ready yet, or returned a redirect/cache response."
+  echo "Try again in a few minutes: curl -L https://\${DOMAIN}/\${TX}"
+fi
 echo
 echo "=== /ar-io/info ==="
 curl -fsS "https://\${DOMAIN}/ar-io/info" | jq '{release,wallet,programIds}' || true
 echo
 echo "=== observer report ==="
-curl -fsS "https://\${DOMAIN}/ar-io/observer/reports/current" | jq . || true
+if ! curl -fsS "https://\${DOMAIN}/ar-io/observer/reports/current" | jq .; then
+  echo "Observer report is not ready yet. This is common right after startup."
+  echo "Check again after a few minutes, or run: docker compose logs observer --tail=120"
+fi
 echo
 echo "=== local docker ==="
 cd ${INSTALL_DIR}
@@ -862,6 +887,36 @@ echo "=== payment logs ==="
 docker compose logs core --tail=300 | grep -Ei "x402|payment|rate limit" || true
 EOF
 
+  cat > /usr/local/bin/gateway-balance <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd ${INSTALL_DIR}
+source .env
+
+WALLET="\${1:-\${OBSERVER_WALLET}}"
+RPC="\${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}"
+
+echo "=== Solana balance ==="
+echo "wallet: \${WALLET}"
+echo "rpc: \${RPC%%\\?*}"
+
+if command -v solana >/dev/null 2>&1; then
+  solana balance "\${WALLET}" --url "\${RPC}"
+  exit 0
+fi
+
+curl -fsS "\${RPC}" \\
+  -H "content-type: application/json" \\
+  -d "{\\"jsonrpc\\":\\"2.0\\",\\"id\\":1,\\"method\\":\\"getBalance\\",\\"params\\":[\\"\${WALLET}\\"]}" \\
+  | jq -r '
+      if .result.value then
+        "balance: " + ((.result.value / 1000000000) | tostring) + " SOL"
+      else
+        "balance lookup failed: " + (.error.message // "unknown error")
+      end
+    '
+EOF
+
   cat > /usr/local/bin/gateway-renew-cert <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -877,6 +932,7 @@ EOF
     /usr/local/bin/gateway-status \
     /usr/local/bin/gateway-check \
     /usr/local/bin/gateway-x402-check \
+    /usr/local/bin/gateway-balance \
     /usr/local/bin/gateway-renew-cert
 }
 
@@ -892,6 +948,7 @@ finish() {
   echo "  gateway-update"
   echo "  gateway-restart"
   echo "  gateway-x402-check"
+  echo "  gateway-balance"
   echo "  gateway-renew-cert"
   echo
   echo "Important:"
