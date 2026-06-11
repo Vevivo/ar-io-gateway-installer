@@ -641,100 +641,60 @@ configure_wallet() {
   echo "The ${role_label} expects a Solana keypair JSON file here:"
   echo "  ${INSTALL_DIR}/${target}"
   echo
-  echo "You can provide it in three ways:"
-  echo "  1) existing JSON file path on this server, like /root/id.json"
-  echo "  2) pasted Solana keypair JSON array, like [192,15,...,17]"
-  echo "  3) pasted Phantom/Solana seed phrase, or exported private key/base58"
+  echo "Paste or enter ONE key material value. The installer detects the format automatically:"
+  echo "  - existing JSON file path on this server, like /root/id.json"
+  echo "  - Solana keypair JSON array, like [192,15,...,17]"
+  echo "  - Phantom/Solana seed phrase words"
+  echo "  - exported Solana private key/base58"
   echo
   echo "Seed phrase/private key input is visible on purpose so you can catch typos."
+  echo "The derived public address must match: ${wallet_address}"
   echo "Use this only on your own secure terminal."
   echo
 
   while true; do
-    if confirm "Do you already have a Solana keypair JSON file or JSON array" "n"; then
-      local keypair_input
-      keypair_input="$(prompt "Path, pasted JSON array, or private key. Blank = multi-line paste" "")"
-      if [[ -n "$keypair_input" ]]; then
-        if [[ -f "$keypair_input" ]]; then
-          if try_convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address" < "$keypair_input"; then
-            ok "Keyfile installed: ${INSTALL_DIR}/${target}"
-            return
-          fi
-          warn "That key did not match ${wallet_address}, or it was not valid."
-          confirm "Try the ${role_label} keyfile step again" "y" && continue
-          warn "Skipped keyfile. You can add it later at ${INSTALL_DIR}/${target}."
-          return
-        fi
-        if printf "%s" "$keypair_input" | try_convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address"; then
-          ok "Keyfile installed: ${INSTALL_DIR}/${target}"
-          return
-        fi
-        if [[ "$keypair_input" == /* || "$keypair_input" == ./* || "$keypair_input" == *.json ]]; then
-          warn "Keypair file not found or invalid: ${keypair_input}"
-        else
-          warn "That pasted keypair/private key did not match ${wallet_address}, or it was not valid."
-        fi
-        confirm "Try the ${role_label} keyfile step again" "y" && continue
-        warn "Skipped keyfile. You can add it later at ${INSTALL_DIR}/${target}."
-        return
-      fi
-      echo "Paste the complete JSON array, then press ENTER and CTRL+D:"
-      if try_convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address"; then
-        ok "Keyfile installed: ${INSTALL_DIR}/${target}"
-        return
-      fi
-      warn "That JSON did not match ${wallet_address}, or it was not valid."
-      confirm "Try the ${role_label} keyfile step again" "y" && continue
-      warn "Skipped keyfile. You can add it later at ${INSTALL_DIR}/${target}."
-      return
-    elif confirm "Do you have Phantom/Solana seed phrase words" "n"; then
-      local mnemonic
-      echo "Paste seed phrase words visibly on one line, then press Enter."
-      echo "The installer will try common Phantom Solana paths and only save the key if the public address matches:"
-      echo "  ${wallet_address}"
-      printf "Seed phrase: " >&2
-      read -r mnemonic
-      if [[ -z "$mnemonic" ]]; then
-        warn "Seed phrase was empty."
-        confirm "Try the ${role_label} keyfile step again" "y" && continue
-        warn "Skipped keyfile. You can add it later at ${INSTALL_DIR}/${target}."
-        return
-      fi
-      if printf "%s" "$mnemonic" | try_convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address"; then
-        unset mnemonic
-        ok "Seed phrase converted to Solana keypair JSON: ${INSTALL_DIR}/${target}"
-        return
-      fi
-      unset mnemonic
-      warn "Seed phrase did not derive ${wallet_address}. Check spelling/order or use exported private key."
-      confirm "Try the ${role_label} keyfile step again" "y" && continue
-      warn "Skipped keyfile. You can add it later at ${INSTALL_DIR}/${target}."
-      return
-    elif confirm "Paste exported Solana private key/base58 and convert it now" "n"; then
-      local private_key
-      printf "Paste exported Solana private key/base58 visibly: " >&2
-      read -r private_key
-      printf "\n" >&2
-      if [[ -z "$private_key" ]]; then
-        warn "Private key was empty."
-        confirm "Try the ${role_label} keyfile step again" "y" && continue
-        warn "Skipped keyfile. You can add it later at ${INSTALL_DIR}/${target}."
-        return
-      fi
-      if printf "%s" "$private_key" | try_convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address"; then
-        unset private_key
-        ok "Private key converted to Solana keypair JSON: ${INSTALL_DIR}/${target}"
-        return
-      fi
-      unset private_key
-      warn "Private key did not match ${wallet_address}, or it was not valid."
-      confirm "Try the ${role_label} keyfile step again" "y" && continue
-      warn "Skipped keyfile. You can add it later at ${INSTALL_DIR}/${target}."
-      return
-    else
+    local key_material
+    key_material="$(prompt "Key material for ${wallet_address}. Blank = multi-line paste, SKIP = add later" "")"
+
+    if [[ "${key_material,,}" == "skip" ]]; then
       warn "Skipped keyfile. Gateway can serve traffic, but ${role_label} protocol actions need ${INSTALL_DIR}/${target}."
       return
     fi
+
+    if [[ -n "$key_material" ]]; then
+      if [[ -f "$key_material" ]]; then
+        if try_convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address" < "$key_material"; then
+          ok "Keyfile installed: ${INSTALL_DIR}/${target}"
+          return
+        fi
+        warn "That file did not contain key material for ${wallet_address}, or it was not valid."
+      else
+        if printf "%s" "$key_material" | try_convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address"; then
+          ok "Keyfile installed: ${INSTALL_DIR}/${target}"
+          return
+        fi
+        if [[ "$key_material" == /* || "$key_material" == ./* || "$key_material" == *.json ]]; then
+          warn "Keypair file not found or invalid: ${key_material}"
+        else
+          warn "That key material did not derive ${wallet_address}, or it was not valid."
+        fi
+      fi
+
+      confirm "Try the ${role_label} keyfile step again" "y" && continue
+      warn "Skipped keyfile. You can add it later at ${INSTALL_DIR}/${target}."
+      return
+    fi
+
+    echo "Paste the complete key material now, then press CTRL+D when finished."
+    echo "Accepted: JSON array, seed phrase words, or exported private key/base58."
+    if try_convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address"; then
+      ok "Keyfile installed: ${INSTALL_DIR}/${target}"
+      return
+    fi
+    warn "That key material did not derive ${wallet_address}, or it was not valid."
+    confirm "Try the ${role_label} keyfile step again" "y" && continue
+    warn "Skipped keyfile. You can add it later at ${INSTALL_DIR}/${target}."
+    return
   done
 }
 
