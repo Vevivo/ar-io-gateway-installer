@@ -137,7 +137,7 @@ EOF
   echo "  - Docker Compose services"
   echo "  - nginx reverse proxy"
   echo "  - wildcard SSL with Certbot DNS challenge"
-  echo "  - Solana observer keyfile placement"
+  echo "  - Solana operator and observer keyfile placement"
   echo "  - optional x402 USDC data egress payments"
   echo "  - helper commands: gateway-check, logs, status, update"
   echo
@@ -182,7 +182,8 @@ collect_config() {
   fi
 
   echo
-  warn "Epoch cranking is optional. It spends a small amount of SOL and requires the main wallet keypair on the server."
+  warn "The main/operator Solana keypair is required even when epoch cranking is off."
+  warn "Epoch cranking is optional. If enabled, it spends a small amount of SOL from the main/operator wallet."
   if confirm "Enable optional epoch cranking with the main Solana wallet" "n"; then
     ENABLE_EPOCH_CRANKING="true"
   fi
@@ -310,6 +311,7 @@ ARNS_ROOT_HOST=${DOMAIN}
 AR_IO_WALLET=${AR_IO_WALLET}
 OBSERVER_WALLET=${OBSERVER_WALLET}
 SOLANA_RPC_URL=${SOLANA_RPC_URL}
+SOLANA_KEYPAIR_PATH=/app/wallets/${AR_IO_WALLET}.json
 OBSERVER_KEYPAIR_PATH=/app/wallets/${OBSERVER_WALLET}.json
 ENABLE_EPOCH_CRANKING=${ENABLE_EPOCH_CRANKING}
 
@@ -342,10 +344,6 @@ ANS104_DATA_INDEXER_QUEUE_SIZE=500000
 
 RUN_AUTOHEAL=true
 EOF
-
-  if [[ "$ENABLE_EPOCH_CRANKING" == "true" ]]; then
-    printf "SOLANA_KEYPAIR_PATH=/app/wallets/%s.json\n" "$AR_IO_WALLET" >> .env
-  fi
 
   if [[ "$REPORT_DATA_SINK" == "arweave" ]]; then
     printf "REPORT_DATA_SINK=arweave\n" >> .env
@@ -851,7 +849,16 @@ echo
 echo "=== observer report ==="
 if ! curl -fsS "https://\${DOMAIN}/ar-io/observer/reports/current" | jq .; then
   echo "Observer report is not ready yet. This is common right after startup."
-  echo "Check again after a few minutes, or run: docker compose logs observer --tail=120"
+  echo "If this persists, run: gateway-observer-check"
+  echo
+  echo "Observer container:"
+  cd ${INSTALL_DIR}
+  docker compose ps observer || true
+  echo
+  echo "Recent observer key/config errors:"
+  docker compose logs observer --tail=120 2>/dev/null \
+    | grep -Ei 'Operator Solana key is required|SOLANA_KEYPAIR_PATH|OBSERVER_KEYPAIR_PATH|SOLANA_PRIVATE_KEY|OBSERVER_PRIVATE_KEY|wallet|error|warn' \
+    | tail -40 || true
 fi
 echo
 echo "=== local docker ==="
@@ -1232,8 +1239,12 @@ finish() {
   echo
   echo "Important:"
   echo "  This installer did not run platform registration commands."
-  echo "  If observer reports matter, make sure this file exists:"
-  echo "  ${INSTALL_DIR}/wallets/${OBSERVER_WALLET}.json"
+  echo "  Solana mode requires the operator keyfile:"
+  echo "  ${INSTALL_DIR}/wallets/${AR_IO_WALLET}.json"
+  if [[ "$OBSERVER_WALLET" != "$AR_IO_WALLET" ]]; then
+    echo "  Observer reports also require the observer keyfile:"
+    echo "  ${INSTALL_DIR}/wallets/${OBSERVER_WALLET}.json"
+  fi
   echo
   /usr/local/bin/gateway-check || true
 }
@@ -1246,9 +1257,11 @@ main() {
   install_docker
   clone_node
   write_env
-  configure_wallet "observer" "$OBSERVER_WALLET"
-  if [[ "$ENABLE_EPOCH_CRANKING" == "true" && "$AR_IO_WALLET" != "$OBSERVER_WALLET" ]]; then
-    configure_wallet "main/operator cranking" "$AR_IO_WALLET"
+  configure_wallet "main/operator" "$AR_IO_WALLET"
+  if [[ "$OBSERVER_WALLET" == "$AR_IO_WALLET" ]]; then
+    ok "Observer wallet matches main/operator wallet; reusing the same keyfile."
+  else
+    configure_wallet "observer" "$OBSERVER_WALLET"
   fi
   start_gateway
   configure_firewall_ssl_nginx
