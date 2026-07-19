@@ -211,3 +211,13 @@ Yorum:
 - `LeaveWindowNotExpired`, `6079`, `0x17bf`: genelde cleanup/cranker not-ready gurultusudur.
 
 
+Kalan süre 
+
+cd /opt/ar-io-node
+
+while true; do
+  docker compose exec -T observer node -e 'const fs=require("fs"); const p="/app/data/observer/observation-state.json"; if(!fs.existsSync(p)){console.log(new Date().toISOString(),"state yok"); process.exit(0)} const s=JSON.parse(fs.readFileSync(p,"utf8")); const pending=s.pendingObservations?.length??0; const observed=s.gatewayObservations?Object.keys(s.gatewayObservations).length:null; const left=s.windowEnd?(s.windowEnd-Date.now())/60000:null; const req=left&&left>0?pending/left:null; console.log(JSON.stringify({now:new Date().toISOString(),epoch:s.epochIndex,pending,observed,submitted:s.reportSubmitted,deadlineExceeded:s.submissionDeadlineExceeded,minutesLeft:left===null?null:Math.round(left),requiredPerMinute:req===null?null:+req.toFixed(2),windowEnd:s.windowEnd?new Date(s.windowEnd).toISOString():null},null,2));'
+  echo
+  echo "60 sn sonra yenilenecek. Cikmak icin CTRL+C"
+  sleep 60
+done
