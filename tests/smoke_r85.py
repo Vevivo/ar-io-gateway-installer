@@ -7,7 +7,6 @@ import subprocess
 import sqlite3
 import sys
 import time
-import urllib.request
 
 PIN = '6c7006d530355c8f07240e28bebac5c9f6c71b7d'
 IMAGES = {
@@ -56,7 +55,6 @@ def prepare(base, project):
     assert services['observer']['environment']['REPORT_DATA_SINK'] == 'turbo'
     result = {'name': project, 'services': {}, 'networks': {'smoke': {'internal': True}}}
     caps = {'core': ('2.5g', 1.5), 'observer': ('1g', 0.75), 'envoy': ('256m', 0.25), 'redis': ('192m', 0.25)}
-    ports = {'core': 4000, 'observer': 5050, 'envoy': 3000}
     for name, image in IMAGES.items():
         s = copy.deepcopy(services[name])
         assert s['image'] == ('redis:7' if name == 'redis' else image), (name, s['image'])
@@ -66,10 +64,6 @@ def prepare(base, project):
         s.update(restart='no', networks=['smoke'], mem_limit=caps[name][0], cpus=caps[name][1], pids_limit=256)
         s['logging'] = {'driver': 'json-file', 'options': {'max-size': '5m', 'max-file': '2'}}
         s['security_opt'] = ['no-new-privileges:true']
-        if name in ports:
-            # Internal networks deliberately have no external egress. Host-local
-            # port access is used only by this smoke checker.
-            s['ports'] = [{'target': ports[name], 'published': str(ports[name]), 'host_ip': '127.0.0.1', 'protocol': 'tcp'}]
         for volume in s.get('volumes', []):
             if volume['type'] == 'volume':
                 assert volume['source'] == 'envoy-eds-data'
@@ -113,12 +107,28 @@ def prepare(base, project):
     })
 
 
-def get_json(url):
-    with urllib.request.urlopen(url, timeout=5) as response:
-        assert response.status == 200
-        raw = response.read(128*1024+1)
-        assert len(raw) <= 128*1024
-        return json.loads(raw)
+def get_json(url, probe_container):
+    # Docker internal networks can suppress host port publishing. Keep egress
+    # isolation and make genuine bounded HTTP requests from the running core
+    # container instead. No new probe container and no mocked response.
+    script = '''
+const response = await fetch(process.argv[1], {signal: AbortSignal.timeout(5000)});
+if (response.status !== 200) throw new Error(`HTTP ${response.status}`);
+const chunks = []; let bytes = 0;
+for await (const chunk of response.body) {
+  bytes += chunk.length;
+  if (bytes > 131072) throw new Error('Response exceeds 128 KiB');
+  chunks.push(chunk);
+}
+const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+process.stdout.write(JSON.stringify(body));
+'''
+    result = subprocess.run(['docker', 'exec', probe_container, '/nodejs/bin/node',
+                             '--input-type=module', '-e', script, url],
+                            text=True, capture_output=True, timeout=10)
+    if result.returncode:
+        raise RuntimeError(url + ': ' + result.stderr.strip()[-800:])
+    return json.loads(result.stdout)
 
 
 def check(base, project):
@@ -133,21 +143,22 @@ def check(base, project):
     assert len(networks) == 1
     network = json.loads(command(['docker', 'network', 'inspect', *networks]))[0]
     assert network['Internal'] is True
+    core_id = next(c['Id'] for c in containers if c['Config']['Labels']['com.docker.compose.service'] == 'core')
     observations = []
     deadline = time.monotonic() + 180
     expected_observer = (base/'addresses.txt').read_text().split()[1]
     while time.monotonic() < deadline:
         try:
-            health = get_json('http://127.0.0.1:4000/ar-io/healthcheck')
+            health = get_json('http://127.0.0.1:4000/ar-io/healthcheck', core_id)
             assert health['status'] == 'ok', health
-            direct = get_json('http://127.0.0.1:5050/ar-io/observer/healthcheck')
+            direct = get_json('http://observer:5050/ar-io/observer/healthcheck', core_id)
             assert direct['uptime'] > 0
-            proxy = get_json('http://127.0.0.1:3000/ar-io/healthcheck')
+            proxy = get_json('http://envoy:3000/ar-io/healthcheck', core_id)
             assert proxy['status'] == 'ok'
-            info = get_json('http://127.0.0.1:3000/ar-io/observer/info')
+            info = get_json('http://envoy:3000/ar-io/observer/info', core_id)
             assert info['wallet'] == expected_observer, info
             assert info['reportSink'] == 'turbo'
-            core_info = get_json('http://127.0.0.1:3000/ar-io/info')
+            core_info = get_json('http://envoy:3000/ar-io/info', core_id)
             observations.append({'ok': True, 'coreHealth': health, 'observerHealth': direct, 'observerInfo': info, 'coreInfo': core_info})
             break
         except Exception as error:
