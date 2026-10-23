@@ -1,223 +1,104 @@
+# Vevivo AR.IO Gateway Kurucusu — R85
+
+Kurulumu tek komutla başlatın; alan adı ve cüzdan bilgileri ekranda sorulur. Kurucu Docker, Nginx ve HTTPS ile resmi R85 sürümünü hazırlar; **observer etkin olarak kurulur**. Ağa kayıt ve stake işlemini sonrasında siz tamamlarsınız; kurulumun bitmesi ödül kazanıldığı anlamına gelmez.
+
+## Başlamadan önce
+
+- Yeni kurulum için bu işe ayrılmış **Ubuntu 22.04 veya 24.04** sunucu ve root erişimi hazırlayın. Kapasite seçimi için [resmi sistem gereksinimlerine](https://docs.ar.io/build/run-a-gateway/quick-start#system-requirements) bakın.
+- Kök alan adınızı ve `*.alanadiniz.com` wildcard kaydını sunucunun IP adresine yönlendirin. DNS paneline erişiminiz açık olsun; sertifika alınırken TXT kaydı ekleyeceksiniz.
+- Solana operatör ve observer cüzdanlarınızın açık adreslerini ve bunlarla eşleşen anahtar dosyalarını hazırlayın. Observer adresi başka bir gateway tarafından kullanılmamalıdır; operatörle aynı cüzdanı kullanmak desteklenir. [Resmi cüzdan açıklaması](https://docs.ar.io/build/run-a-gateway/join-the-network/)
+- Solana mainnet RPC adresinizi hazır bulundurun. Üretimde istek sınırlarına takılmayan bir RPC sağlayıcısı kullanın. [Resmi RPC ayarları](https://docs.ar.io/build/run-a-gateway/manage/environment-variables)
+
+**Özel anahtarı veya kurtarma kelimelerini sohbete, GitHub'a ya da destek mesajına göndermeyin.** Anahtar dosyalarını kendi yönettiğiniz sunucuya güvenli biçimde aktarın; kurucunun yerel anahtar adımını kullanın.
+
+## Kurulum
+
+Sunucuya **root** olarak bağlanın ve çalıştırın:
+
+```bash
 bash <(wget -qO- https://raw.githubusercontent.com/Vevivo/ar-io-gateway-installer/main/install-gateway.sh)
-
-
-cd /opt/ar-io-node
-
-gateway-check	En Önemlisi! Node'unuzun sağlığını kontrol eder ve test linkini verir.
-
-gateway-update	Node yazılımını son sürüme günceller (Verilerinizi silmez, güvenlidir).
-
-gateway-restart	Tüm servisleri kapatıp temiz bir şekilde yeniden başlatır.
-
-gateway-logs	Core ve Observer loglarını canlı izlemenizi sağlar.
-
-gateway-status	Docker konteynerlerinin CPU ve RAM kullanımını gösterir.
-
-gateway-renew-cert	90 günde bir süresi dolan SSL sertifikasını yeniler.
-
-# ar.io Gateway Hizli Tani Akisi
-
-Bu dosya, gateway durumunu hizli kontrol etmek icin kopyala-yapistir komutlari icerir.
-
-Guvenlik notu:
-- Bu komutlar API key, private key veya keypair icerigi yazdirmaz.
-- `<DOMAIN>` yazan yeri kendi domaininizle degistirin. Ornek: `vevivo.art`
-- Komutlari sunucuda `/opt/ar-io-node` dizininde calistirin.
-
-## Baslangic
-
-```bash
-cd /opt/ar-io-node
 ```
 
-## 1. Servisler Ayakta Mi?
+Yeni sunucuda alan adı, cüzdanlar ve RPC sorularını yanıtlayın. Certbot beklediğinde DNS panelinize ekranda verilen `_acme-challenge` TXT kayıtlarını ekleyin; kayıtlar yayımlandıktan sonra devam edin. Anahtar doğrulaması tamamlanmadan servisleri başlatmayın.
+
+Bu kurucuyla daha önce kurulmuş bir gateway'de aynı komut mevcut `.env` dosyasını algılar ve **R85 yükseltme akışını** kullanır. Mevcut cüzdan ve ayarları korur; yeni kurulum sorularını tekrar sormaz. İşlem servisleri yeniden oluşturacağından kısa kesinti için uygun bir zaman seçin ve önceden yedek alın.
+
+Kurulum veya yükseltme bitince:
 
 ```bash
-docker compose ps
+gateway-check
 ```
 
-Beklenen:
-- `core`, `observer`, `envoy`, `redis`, `autoheal` servisleri `Up` olmali.
-- `core` ve `observer` icin `healthy` gormek iyi isarettir.
+HTTPS, örnek dosya ve servis sonuçlarını kontrol edin. Hata varsa aşağıdaki tanılama bölümünü açın.
 
-## 2. Gateway Cevap Veriyor Mu?
+## Ödül katılımını tamamlayın
+
+1. **Cüzdanları hazırlayın.** Operatör cüzdanında kayıt için gerekli ARIO stake ve işlem ücreti için SOL; observer cüzdanında gözlem gönderimleri için SOL bulundurun. Güncel stake miktarını [resmi katılım rehberinden](https://docs.ar.io/build/run-a-gateway/join-the-network/) ve kayıt ekranından kontrol edin. [Observer'ın SOL ihtiyacı](https://docs.ar.io/build/run-a-gateway/manage/solana-migration/#fund-your-wallets-with-sol)
+2. **Rapor yükleme bakiyesini hazırlayın.** Yeni kurulum Turbo kullanır; raporları observer cüzdanıyla yükler. Gerektiğinde [AR.IO Console üzerinden](https://console.ar.io/topup) bu cüzdanın **Solana adresine** Turbo Credits ekleyin. SOL işlem bakiyesi ile Turbo Credits farklıdır. Ücretsiz yükleme sınırlarına güvenerek sürekli işletim planlamayın. [Turbo ödeme rehberi](https://docs.ar.io/build/upload/turbo-credits)
+3. **Ağa kaydolun.** [Gateway portalında](https://gateways.ar.io) kurulumdaki operatör cüzdanıyla bağlanın. Alan adınızı, HTTPS/443 bilgisini ve kurulumdaki observer adresini girin; stake ve diğer kayıt alanlarını kontrol edip işlemi onaylayın. Ardından portalda kaydın ve performans sonuçlarının oluştuğunu doğrulayın. [Resmi kayıt adımları](https://docs.ar.io/build/run-a-gateway/join-the-network/)
+
+Gateway'i ve observer'ı çalışır, sertifikayı geçerli, bakiyeleri yeterli tutun. Ödüller ağ kurallarına ve hizmet performansına bağlıdır; bu kurucu gelir veya ödül garantisi vermez. [Gözlem ve ödül protokolü](https://docs.ar.io/learn/oip)
+
+<details>
+<summary>Bakım, R85 sürüm sabitlemesi ve sertifika yenileme</summary>
+
+| Komut | Ne yapar? |
+| --- | --- |
+| `gateway-check` | Dış erişimi, örnek dosyayı ve servisleri kontrol eder. |
+| `gateway-status` | Servis, kaynak ve disk durumunu gösterir. |
+| `gateway-balance` | Observer'ın SOL bakiyesini gösterir. |
+| `gateway-logs` | Core, observer ve Envoy günlüklerini izler. |
+| `gateway-observer-check` | Observer ayarları ve rapor durumunu inceler. |
+| `gateway-update` | Sabitlenmiş R85 sürümünü uygular ve servisleri yeniden oluşturur. |
+| `gateway-restart` | Servisleri yeniden oluşturur; kısa kesinti olabilir. |
+| `gateway-renew-cert` | Yeni DNS TXT doğrulamasıyla sertifikayı yeniler. |
+| `gateway-help` | Yardımcı komutları listeler. |
+
+Bu kurucu [resmi `r85` sürümüne](https://github.com/ar-io/ar-io-node/releases/tag/r85), `6c7006d530355c8f07240e28bebac5c9f6c71b7d` commit'ine sabitlenmiştir. `gateway-update` kendiliğinden daha yeni bir sürüme geçmez. Gelecekteki bir sürüme geçiş, sürüm notları incelendikten sonra bilinçli olarak yapılmalıdır.
+
+Wildcard sertifika **manuel DNS doğrulaması** kullanır. Otomatik yenilendiğini varsaymayın: süresi dolmadan `gateway-renew-cert` çalıştırın ve yeni TXT kayıtlarını ekleyin. DNS paneline erişimi ve yenileme takibini koruyun.
+
+</details>
+
+<details>
+<summary>Mevcut kurulumdan R85'e geçerken</summary>
+
+Yeni kurulum Nginx başlık tamponlarını ayarlar, yükseltme ise mevcut Nginx dosyanızı korur; eksikse aşağıdaki satırları HTTPS `server` bloğuna ekleyip yapılandırmayı test ederek yeniden yükleyin:
+
+```nginx
+proxy_buffer_size 32k;
+proxy_buffers 8 32k;
+proxy_busy_buffers_size 64k;
+```
 
 ```bash
-curl -s https://<DOMAIN>/ar-io/info | jq .
+nginx -t && systemctl reload nginx
 ```
 
-`jq` yoksa:
+Özel Arweave/Ethereum rapor yükleme ayarları korunur; otomatik yükseltme bu durumda servisleri başlatmadan durur ve ayarları elle doğrulamanızı ister.
+
+Yerel Git değişikliği veya R85'ten daha yeni bir sürüm saptanırsa yükseltme durur; mevcut kodu sıfırlamaz.
+
+R85'in yerleşik Index Sharing varsayılanları korunur; kurucu özel yayın veya abonelik ayarı eklemez, disk ve ağ kullanımı için [resmi Index Sharing açıklamasını](https://docs.ar.io/build/run-a-gateway/manage/index-sharing/) inceleyin.
+
+</details>
+
+<details>
+<summary>Bir sorun varsa: kısa tanılama</summary>
+
+Önce şu komutları çalıştırın:
 
 ```bash
-curl -s https://<DOMAIN>/ar-io/info
+gateway-check
+gateway-status
+gateway-observer-check
 ```
 
-Beklenen:
-- `release`
-- `wallet`
-- `programIds`
-- varsa `rateLimiter` ve `x402`
+- DNS veya sertifika hatasında kök/wildcard kayıtlarını ve sertifika süresini kontrol edin.
+- Observer raporu yoksa önce portal kaydını, observer adresini, SOL ve Turbo bakiyelerini inceleyin. Yeni kurulumda henüz rapor oluşmamış olması tek başına başarısızlık değildir.
+- `TurboReportSink` yapılandırma hatasında rapor yükleme anahtarının observer ile eşleştiğini kontrol edin. Yeni kurulum bunu açıkça ayarlar; yükseltme mevcut rapor ödeme yöntemini ve cüzdan tercihlerini korur.
+- Sağlıklı container sonucu, ağ kaydı veya ödül uygunluğu kanıtı değildir. Portal sonuçlarını da kontrol edin.
 
-## 3. Observer State Var Mi?
+Ayrıntılı log için `gateway-logs` kullanın; çıkmak için `Ctrl+C`. Destek isterken `.env`, anahtar dosyası veya RPC erişim anahtarı paylaşmayın. [Resmi sorun giderme rehberi](https://docs.ar.io/build/run-a-gateway/manage/troubleshooting)
 
-```bash
-docker compose exec -T observer node -e 'const fs=require("fs"); const p="/app/data/observer/observation-state.json"; console.log(fs.existsSync(p) ? "state var" : "state yok")'
-```
-
-Beklenen:
-- `state var`: Observer epoch state olusturmus.
-- `state yok`: Observer henuz epoch state olusturmamis veya yeni baslamis olabilir.
-
-## 4. Pending Dusuyor Mu?
-
-```bash
-docker compose exec -T observer node -e 'const fs=require("fs"); const s=JSON.parse(fs.readFileSync("/app/data/observer/observation-state.json","utf8")); console.log("pending",s.pendingObservations?.length??0,"submitted",s.reportSubmitted)'
-```
-
-Beklenen:
-- `pending` zamanla dusuyorsa observer gatewayleri test ediyor.
-- `submitted true` raporun gonderildigini gosterir.
-
-## 5. Observer State Detayli Kontrol
-
-```bash
-docker compose exec -T observer node -e 'const fs=require("fs"); const p="/app/data/observer/observation-state.json"; if(fs.existsSync(p)===false){console.log("state yok"); process.exit(0)} const s=JSON.parse(fs.readFileSync(p,"utf8")); console.log(JSON.stringify({now:new Date().toISOString(),epoch:s.epochIndex,pending:s.pendingObservations?.length??0,observed:s.gatewayObservations?Object.keys(s.gatewayObservations).length:null,submitted:s.reportSubmitted,deadline:s.submissionDeadlineExceeded,windowEnd:s.windowEnd?new Date(s.windowEnd).toISOString():null,lastCycleTimestamp:s.lastCycleTimestamp},null,2));'
-```
-
-Bu komut sunlari gosterir:
-- `epoch`: mevcut epoch
-- `pending`: kalan observation sayisi
-- `observed`: toplanan gateway gozlem sayisi
-- `submitted`: rapor gonderildi mi
-- `deadline`: submission deadline gecildi mi
-- `windowEnd`: observer rapor penceresi bitis zamani
-
-## 6. Rapor Submit Logu Var Mi?
-
-```bash
-docker compose logs observer --since 6h \
-  | grep -Ei 'Report saved|save_observations|Report submitted|reportTxId|interactionTxIds' \
-  | tail -80
-```
-
-Beklenen:
-- `Report saved using TurboReportSink`
-- `save_observations submitted`
-- `Report submitted`
-- `reportTxId` veya `interactionTxIds`
-
-## 7. Kritik Observer Hatasi Var Mi?
-
-```bash
-docker compose logs observer --since 2h \
-  | grep -Ei 'error|failed|Invalid|not configured|Set exactly one' \
-  | grep -Eiv 'finalize_gone|LeaveWindow|6079|0x17bf|Cleanup cycle' \
-  | tail -120
-```
-
-Bu komut, bilinen cleanup/cranker gurultusunu filtreleyip daha anlamli hatalari gosterir.
-
-## 8. Core Saglikli Mi?
-
-```bash
-docker compose logs core --since 20m \
-  | grep -Ei 'Block imported|Peer classification complete|SQLITE_BUSY|database is locked|out of memory|healthcheck failed' \
-  | tail -100
-```
-
-Beklenen:
-- `Block imported`
-- `Peer classification complete`
-
-Dikkat edilecekler:
-- `SQLITE_BUSY`
-- `database is locked`
-- `out of memory`
-- `healthcheck failed`
-
-## 9. Rate Limit En Cok Hangi IP'den Geliyor?
-
-```bash
-docker compose logs core --since 2h \
-  | grep 'IP limit exceeded' \
-  | sed -n 's/.*clientIp":"\([^"]*\)".*/\1/p' \
-  | sort | uniq -c | sort -nr | head -20
-```
-
-Bu komut, rate limit'e en cok takilan IP adreslerini listeler.
-
-## 10. Observer Report Endpoint
-
-```bash
-curl -s https://<DOMAIN>/ar-io/observer/reports/current | jq .
-```
-
-`jq` yoksa:
-
-```bash
-curl -s https://<DOMAIN>/ar-io/observer/reports/current
-```
-
-Beklenen:
-- Rapor hazir degilse `Report pending`
-- Rapor hazirsa current report bilgisi
-
-## 11. Canli Rapor Takip Komutu
-
-```bash
-docker compose logs observer -f --tail=200 \
-  | grep -Ei 'Report saved|save_observations|Report submitted|reportTxId|interactionTxIds|submitted|confirmed|error|failed|not configured|Set exactly one' \
-  | grep -Eiv 'finalize_gone|LeaveWindow|6079|0x17bf|Cleanup cycle'
-```
-
-Bu komut rapor upload, imza ve Solana submit surecini canli takip etmek icindir.
-
-## 12. Pending Hiz Kontrolu
-
-Bu komut 10 dakika bekler ve pending dusme hizini hesaplar.
-
-```bash
-A=$(docker compose exec -T observer node -e 'const fs=require("fs"); const s=JSON.parse(fs.readFileSync("/app/data/observer/observation-state.json","utf8")); console.log(s.pendingObservations?.length??0)')
-echo "START pending=$A at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-
-sleep 600
-
-B=$(docker compose exec -T observer node -e 'const fs=require("fs"); const s=JSON.parse(fs.readFileSync("/app/data/observer/observation-state.json","utf8")); console.log(s.pendingObservations?.length??0)')
-LEFT=$(docker compose exec -T observer node -e 'const fs=require("fs"); const s=JSON.parse(fs.readFileSync("/app/data/observer/observation-state.json","utf8")); const p=s.pendingObservations?.length??0; const left=(s.windowEnd-Date.now())/60000; console.log((p/left).toFixed(2))')
-SPEED=$(awk "BEGIN { printf \"%.2f\", ($A-$B)/10 }")
-
-echo "END pending=$B at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-echo "speed/min=$SPEED required/min=$LEFT"
-```
-
-Yorum:
-- `speed/min` degeri `required/min` degerinden buyukse yetisme ihtimali iyi.
-- `speed/min` degeri `required/min` degerinden kucukse observer pencere kapanmadan bitiremeyebilir.
-
-## Kisa Yorum Rehberi
-
-- `core healthy`, `observer healthy`: servisler ayakta.
-- `pending dusuyor`: observer gatewayleri test ediyor.
-- `pending=0, submitted=true`: rapor gonderildi.
-- `pending=0, submitted=false`: submit, upload veya sign tarafina bak.
-- `Report saved using TurboReportSink`: rapor upload tamam.
-- `save_observations submitted`: Solana submit tamam veya denenmis.
-- `Report submitted`: hedef durum.
-- `IP limit exceeded`: public istekler rate limit'e takiliyor; tek basina kritik sorun degildir.
-- `Failed to fetch chunk`: peer/content erisiminde gecici veya upstream kaynakli sorun olabilir.
-- `Set exactly one...`: `.env` icinde ayni is icin iki farkli key yontemi verilmis; birini kaldir.
-- `TurboReportSink not configured`: report upload sink/key ayari eksik veya container'a gecmemis olabilir.
-- `AccountNotInitialized`: ilgili Solana observation account henuz hazir degil olabilir.
-- `LeaveWindowNotExpired`, `6079`, `0x17bf`: genelde cleanup/cranker not-ready gurultusudur.
-
-
-Kalan süre 
-
-cd /opt/ar-io-node
-
-while true; do
-  docker compose exec -T observer node -e 'const fs=require("fs"); const p="/app/data/observer/observation-state.json"; if(!fs.existsSync(p)){console.log(new Date().toISOString(),"state yok"); process.exit(0)} const s=JSON.parse(fs.readFileSync(p,"utf8")); const pending=s.pendingObservations?.length??0; const observed=s.gatewayObservations?Object.keys(s.gatewayObservations).length:null; const left=s.windowEnd?(s.windowEnd-Date.now())/60000:null; const req=left&&left>0?pending/left:null; console.log(JSON.stringify({now:new Date().toISOString(),epoch:s.epochIndex,pending,observed,submitted:s.reportSubmitted,deadlineExceeded:s.submissionDeadlineExceeded,minutesLeft:left===null?null:Math.round(left),requiredPerMinute:req===null?null:+req.toFixed(2),windowEnd:s.windowEnd?new Date(s.windowEnd).toISOString():null},null,2));'
-  echo
-  echo "60 sn sonra yenilenecek. Cikmak icin CTRL+C"
-  sleep 60
-done
+</details>

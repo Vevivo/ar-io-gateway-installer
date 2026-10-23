@@ -1,0 +1,6 @@
+.env
+.env.*
+wallets/
+secrets/
+__pycache__/
+*.pyc
