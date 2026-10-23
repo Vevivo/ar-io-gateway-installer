@@ -1,0 +1,43 @@
+name: R85 isolated startup smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - install-gateway.sh
+      - tests/smoke_r85.sh
+      - tests/smoke_r85.py
+      - .github/workflows/r85-startup-smoke.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r85-isolated-startup-smoke
+  cancel-in-progress: false
+
+jobs:
+  startup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Boot the real R85 services in a disposable, isolated network
+        timeout-minutes: 16
+        run: timeout --signal=TERM --kill-after=30s 900s bash tests/smoke_r85.sh
+      - name: Final cleanup, including interrupted runs
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/ario-smoke/cleanup.sh" ]; then
+            bash "$RUNNER_TEMP/ario-smoke/cleanup.sh"
+          fi
+      - name: Save only the bounded test report and redacted logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r85-startup-smoke-${{ github.run_id }}
+          path: ${{ runner.temp }}/ario-smoke/artifacts/
+          retention-days: 7
+          if-no-files-found: warn
