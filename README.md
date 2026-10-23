@@ -2,6 +2,8 @@
 
 Kurulumu tek komutla başlatın; alan adı ve cüzdan bilgileri ekranda sorulur. Kurucu Docker, Nginx ve HTTPS ile resmi R85 sürümünü hazırlar; **observer etkin olarak kurulur**. Ağa kayıt ve stake işlemini sonrasında siz tamamlarsınız; kurulumun bitmesi ödül kazanıldığı anlamına gelmez.
 
+**Yeni kurulum sade gateway + observer içindir.** Index Sharing/torrent servisleri, L1 bant içe aktarma ve kendi bantlarını üretme varsayılan olarak çalışmaz. Mevcut kurulum yükseltilirken daha önce seçtiğiniz indeks ayarları korunur.
+
 ## Başlamadan önce
 
 - Yeni kurulum için bu işe ayrılmış **Ubuntu 22.04 veya 24.04** sunucu ve root erişimi hazırlayın. Kapasite seçimi için [resmi sistem gereksinimlerine](https://docs.ar.io/build/run-a-gateway/quick-start#system-requirements) bakın.
@@ -79,7 +81,18 @@ nginx -t && systemctl reload nginx
 
 Yerel Git değişikliği veya R85'ten daha yeni bir sürüm saptanırsa yükseltme durur; mevcut kodu sıfırlamaz.
 
-R85'in yerleşik Index Sharing varsayılanları korunur; kurucu özel yayın veya abonelik ayarı eklemez, disk ve ağ kullanımı için [resmi Index Sharing açıklamasını](https://docs.ar.io/build/run-a-gateway/manage/index-sharing/) inceleyin.
+Mevcut Index Sharing, abonelik, yayın ve Compose override ayarları yükseltmede korunur. Önceki R85 kurulumlarında AR.IO root-TX aboneliği varsayılan açık olabilir; yükseltme bunu kendiliğinden kapatmaz.
+
+</details>
+
+<details>
+<summary>İsteğe bağlı: hazır Root-TX indekslerini kullanmak</summary>
+
+Resmi R85, AR.IO'nun hazır Root-TX bantlarını varsayılan indirip kullanır ve indirilen bantları diğer gateway'lerle paylaşır. Bu kurucu **yeni kurulumlarda** üç Index Sharing servisini `docker-compose.override.yaml` içinde `index-sharing` profiline alır; resmi Compose dosyasını değiştirmez. `.env` içinde abonelik ve yayın listeleri boş, L1 içe aktarma kapalıdır.
+
+Sonradan bu özelliği açmak isterseniz önce [resmi rehberdeki disk ve ağ kullanımını](https://docs.ar.io/build/run-a-gateway/manage/index-sharing/) okuyun. Ardından kurulum dizininizin `.env` dosyasında mevcut satırı `INDEX_SWARM_SUBSCRIBE=` yapın ve `COMPOSE_PROFILES=index-sharing` ekleyin. Bu, AR.IO'nun varsayılan Root-TX aboneliğini etkinleştirir. Kurulum dizininde `docker compose up -d` çalıştırın. Bu ayar **L1 bantlarını veya kendi bantlarınızı üretmeyi açmaz**; bunlar ayrıca yapılandırılır.
+
+`INDEX_SWARM_SUBSCRIBE=[]` yeni indirmeleri kapatır; önceden indirilmiş bantları silmez veya seed işlemini durdurmaz. Tam kapatma için resmi rehberi izleyin. Core'un normal Root-TX çözümlemesi ve gerektiğinde uzak kaynaklara başvurması, bu isteğe bağlı bant indirme hizmetinden ayrıdır.
 
 </details>
 

@@ -238,6 +238,29 @@ source "$1"
     def git_calls(self):
         return [line.rstrip("\t").split("\t") for line in self.git_log.read_text().splitlines()]
 
+    def compose_config(self, profile=None):
+        upstream = Path(os.environ.get("ARIO_UPSTREAM_COMPOSE", REPO.parent / "upstream-ar-io-node-r85" / "docker-compose.yaml"))
+        default_compose = REPO.parent / "starter-validation" / "docker-compose.exe"
+        compose = os.environ.get("ARIO_COMPOSE_BIN") or (str(default_compose) if default_compose.is_file() else shutil.which("docker-compose"))
+        if not upstream.is_file() or not compose:
+            self.skipTest("Optional: provide local R85 Compose YAML and ARIO_COMPOSE_BIN; no downloads are performed")
+        # Exercise Compose's real automatic override discovery, as `up` does.
+        # Only a temporary copy is made; the official checkout is never edited.
+        original = upstream.read_bytes()
+        (self.node / "docker-compose.yaml").write_bytes(original)
+        command = [compose, "--project-directory", str(self.node), "--env-file", str(self.node / ".env")]
+        if profile:
+            command.extend(["--profile", profile])
+        command.extend(["config", "--format", "json"])
+        result = subprocess.run(
+            command, env=isolated_environment(), cwd=self.node, capture_output=True,
+            text=True, encoding="utf-8", timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, "Compose config failed; raw configuration is intentionally not printed")
+        self.assertEqual(upstream.read_bytes(), original)
+        self.assertEqual((self.node / "docker-compose.yaml").read_bytes(), original)
+        return json.loads(result.stdout)
+
     def test_main_is_not_run_when_sourced(self):
         result = self.shell("printf 'library-only\\n'")
         self.assert_success(result)
@@ -272,7 +295,29 @@ source "$1"
         self.assertEqual(values["CORE_LOG_LEVEL"], "info")
         self.assertEqual(values["OBSERVER_LOG_LEVEL"], "info")
         self.assertEqual(values["ENABLE_EPOCH_CRANKING"], "false")
+        self.assertEqual(values["INDEX_SWARM_SUBSCRIBE"], "[]")
+        self.assertEqual(values["INDEX_SWARM_PUBLISH"], "[]")
+        self.assertEqual(values["L1_BAND_IMPORT_ENABLED"], "false")
         self.assertFalse(any(name.endswith("_PRIVATE_KEY") and value for name, value in values.items()))
+
+    def test_fresh_override_refuses_custom_files_without_overwriting(self):
+        for name in ("docker-compose.override.yaml", "docker-compose.override.yml", "compose.override.yaml", "compose.override.yml"):
+            with self.subTest(name=name):
+                target = self.node / name
+                original = b"services:\n  core:\n    cpus: 3\n"
+                target.write_bytes(original)
+                result = self.shell("write_env")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(target.read_bytes(), original)
+                self.assertFalse((self.node / ".env").exists())
+                target.unlink()
+
+    def test_fresh_override_can_resume_before_env_was_written(self):
+        self.assert_success(self.shell("write_fresh_compose_override"))
+        target = self.node / "docker-compose.override.yaml"
+        original = target.read_bytes()
+        self.write_fresh_env()
+        self.assertEqual(target.read_bytes(), original)
 
     def test_fresh_install_refuses_to_replace_existing_env(self):
         target = self.node / ".env"
@@ -310,9 +355,37 @@ source "$1"
         self.assertEqual(values["ARNS_CACHE_TTL_SECONDS"], "7200")
         self.assertEqual(values["SOLANA_UPLOAD_KEYPAIR_PATH"], "${OBSERVER_KEYPAIR_PATH}")
         self.assertEqual(values["SUBMIT_CONTRACT_INTERACTIONS"], "true")
+        for key in ("INDEX_SWARM_SUBSCRIBE", "INDEX_SWARM_PUBLISH", "L1_BAND_IMPORT_ENABLED"):
+            self.assertNotIn(key, values)
+        self.assertFalse((self.node / "docker-compose.override.yaml").exists())
         self.assert_success(self.shell("migrate_env"))
         self.assertEqual(target.read_bytes(), migrated)
         self.assertEqual(len(list(self.node.glob(".env.backup.*"))), 1)
+
+    def test_upgrade_preserves_existing_index_and_compose_choices(self):
+        original = self.legacy_env(
+            'INDEX_SWARM_SUBSCRIBE=[{"publisher":"custom","name":"root-tx-index"}]\n'
+            'INDEX_SWARM_PUBLISH=[{"name":"own","kind":"cdb64-root-tx"}]\n'
+            'L1_BAND_IMPORT_ENABLED=true\nCOMPOSE_PROFILES=index-export\n'
+            'ARNS_ROOT_HOST=gateway.example.com\n'
+        )
+        override = self.node / "docker-compose.override.yaml"
+        custom = b"services:\n  core:\n    cpus: 3\n"
+        override.write_bytes(custom)
+        self.assert_success(self.shell('''clone_node() { cd "$INSTALL_DIR"; }
+validate_observer_config() { :; }
+save_installer() { :; }
+write_helpers() { :; }
+docker() { :; }
+upgrade_gateway
+'''))
+        self.assertEqual(override.read_bytes(), custom)
+        self.assertTrue((self.node / ".env").read_bytes().startswith(original))
+        values = env_values(self.node / ".env")
+        self.assertEqual(values["L1_BAND_IMPORT_ENABLED"], "true")
+        self.assertEqual(values["COMPOSE_PROFILES"], "index-export")
+        self.assertEqual(json.loads(values["INDEX_SWARM_SUBSCRIBE"])[0]["publisher"], "custom")
+        self.assertEqual(json.loads(values["INDEX_SWARM_PUBLISH"])[0]["name"], "own")
 
     def test_migration_refuses_disabled_observer_or_submission_without_writes(self):
         for flag in ("RUN_OBSERVER", "SUBMIT_CONTRACT_INTERACTIONS"):
@@ -460,18 +533,9 @@ write_helpers
         self.assertFalse((self.node / "injected").exists())
 
     def test_actual_official_compose_accepts_generated_env_without_daemon(self):
-        upstream = Path(os.environ.get("ARIO_UPSTREAM_COMPOSE", REPO.parent / "upstream-ar-io-node-r85" / "docker-compose.yaml"))
-        default_compose = REPO.parent / "starter-validation" / "docker-compose.exe"
-        compose = os.environ.get("ARIO_COMPOSE_BIN") or (str(default_compose) if default_compose.is_file() else shutil.which("docker-compose"))
-        if not upstream.is_file() or not compose:
-            self.skipTest("Optional: provide local R85 Compose YAML and ARIO_COMPOSE_BIN; no downloads are performed")
-        env_file = self.write_fresh_env()
-        result = subprocess.run(
-            [compose, "--project-directory", str(self.node), "--env-file", str(env_file), "-f", str(upstream), "config", "--format", "json"],
-            env=isolated_environment(), cwd=self.node, capture_output=True, text=True, encoding="utf-8", timeout=30,
-        )
-        self.assertEqual(result.returncode, 0, "Compose config failed; raw configuration is intentionally not printed")
-        services = json.loads(result.stdout)["services"]
+        self.write_fresh_env()
+        config = self.compose_config()
+        services = config["services"]
         self.assertEqual(services["core"]["image"], CORE_IMAGE)
         self.assertEqual(services["observer"]["image"], OBSERVER_IMAGE)
         observer = services["observer"]["environment"]
@@ -479,8 +543,8 @@ write_helpers
         self.assertEqual(observer["SUBMIT_CONTRACT_INTERACTIONS"], "true")
         self.assertEqual(observer["SOLANA_KEYPAIR_PATH"], f"/app/wallets/{ADDRESS}.json")
         self.assertEqual(observer["SOLANA_UPLOAD_KEYPAIR_PATH"], f"/app/wallets/{ADDRESS2}.json")
-        self.assertTrue({"index-swarm", "index-swarm-engine", "index-swarm-engine-init"}.issubset(services))
-        config = json.loads(result.stdout)
+        self.assertTrue({"index-swarm", "index-swarm-engine", "index-swarm-engine-init", "index-export"}.isdisjoint(services))
+        self.assertEqual(services["core"]["environment"]["L1_BAND_IMPORT_ENABLED"], "false")
         config_file = self.root / "compose-fixture.json"
         config_file.write_text(json.dumps(config), encoding="utf-8")
         wallet_dir = self.node / "wallets"
@@ -504,6 +568,19 @@ cat "$TEST_COMPOSE_JSON"
         invalid["services"]["core"]["image"] = "ghcr.io/ar-io/ar-io-core:latest"
         config_file.write_text(json.dumps(invalid), encoding="utf-8")
         self.assertNotEqual(self.shell("validate_observer_config", extra).returncode, 0)
+
+    def test_index_sharing_profile_is_deliberate_and_does_not_enable_export(self):
+        env_file = self.write_fresh_env()
+        content = env_file.read_text(encoding="utf-8")
+        content = content.replace("INDEX_SWARM_SUBSCRIBE=[]", "INDEX_SWARM_SUBSCRIBE=")
+        env_file.write_text(content + "\nCOMPOSE_PROFILES=index-sharing\n", encoding="utf-8")
+        services = self.compose_config()["services"]
+        self.assertTrue({"index-swarm", "index-swarm-engine", "index-swarm-engine-init"}.issubset(services))
+        self.assertNotIn("index-export", services)
+        swarm = services["index-swarm"]["environment"]
+        self.assertEqual(swarm["INDEX_SWARM_SUBSCRIBE"], "")
+        self.assertEqual(swarm["INDEX_SWARM_PUBLISH"], "[]")
+        self.assertEqual(services["core"]["environment"]["L1_BAND_IMPORT_ENABLED"], "false")
 
 
 if __name__ == "__main__":

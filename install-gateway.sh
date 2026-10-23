@@ -575,10 +575,42 @@ clone_node() {
   [[ "$(git rev-parse HEAD)" == "$ARIO_COMMIT" ]] || die "Unexpected upstream commit; services were not started."
 }
 
+write_fresh_compose_override() {
+  # Fresh installs only. Keep upstream tracked files and existing installations intact.
+  [[ ! -e "$INSTALL_DIR/.env" ]] || die "Existing installation: preserve its Compose and Index Sharing settings."
+  python3 - "$INSTALL_DIR" <<'PY'
+import pathlib, sys
+root = pathlib.Path(sys.argv[1])
+target = root / 'docker-compose.override.yaml'
+content = b'''# Generated for a new basic gateway installation. See the installer README.
+# Index Sharing is opt-in; the official R85 Compose file is unchanged.
+services:
+  index-swarm:
+    profiles: [index-sharing]
+  index-swarm-engine:
+    profiles: [index-sharing]
+  index-swarm-engine-init:
+    profiles: [index-sharing]
+'''
+for name in ('compose.override.yaml', 'compose.override.yml', 'docker-compose.override.yml'):
+    path = root / name
+    if path.exists() or path.is_symlink():
+        raise SystemExit(f'Existing {name}: review your custom Compose configuration first; nothing was overwritten.')
+if target.exists() or target.is_symlink():
+    if target.is_symlink() or not target.is_file() or target.read_bytes() != content:
+        raise SystemExit('Existing docker-compose.override.yaml differs from the basic installer settings; nothing was overwritten.')
+else:
+    with target.open('xb') as output:
+        output.write(content)
+    target.chmod(0o644)
+PY
+}
+
 write_env() {
   log "[6/8] Writing .env"
   cd "$INSTALL_DIR"
   [[ ! -e .env ]] || die ".env already exists. Use --upgrade to preserve existing settings."
+  write_fresh_compose_override
   local admin_key log_level="info"
   admin_key="$(openssl rand -hex 32)"
   [[ "$ENABLE_DEBUG_LOGS" == "true" ]] && log_level="debug"
@@ -595,6 +627,11 @@ GRAPHQL_HOST=${GRAPHQL_HOST}
 GRAPHQL_PORT=${GRAPHQL_PORT}
 START_HEIGHT=${START_HEIGHT}
 START_WRITERS=true
+
+# Optional Index Sharing; enabled deliberately as described in the README.
+INDEX_SWARM_SUBSCRIBE=[]
+INDEX_SWARM_PUBLISH=[]
+L1_BAND_IMPORT_ENABLED=false
 
 RUN_OBSERVER=true
 ARNS_ROOT_HOST=${DOMAIN}
