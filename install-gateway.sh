@@ -9,6 +9,10 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 INSTALL_DIR="${INSTALL_DIR:-/opt/ar-io-node}"
+HELPER_BIN_DIR="${HELPER_BIN_DIR:-/usr/local/bin}"
+ARIO_RELEASE="r85"
+ARIO_COMMIT="6c7006d530355c8f07240e28bebac5c9f6c71b7d"
+REPORT_DATA_SINK="turbo"
 DOMAIN="${ARNS_ROOT_HOST:-${DOMAIN:-}}"
 AR_IO_WALLET="${AR_IO_WALLET:-${ARIO_WALLET:-}}"
 OBSERVER_WALLET="${OBSERVER_WALLET:-}"
@@ -51,7 +55,7 @@ ENABLE_DEBUG_LOGS="false"
 
 log() { printf "%b\n" "${CYAN}==>${NC} $*"; }
 ok() { printf "%b\n" "${GREEN}OK${NC} $*"; }
-warn() { printf "%b\n" "${YELLOW}WARN${NC} $*"; }
+warn() { printf "%b\n" "${YELLOW}WARN${NC} $*" >&2; }
 die() { printf "%b\n" "${RED}ERROR${NC} $*" >&2; exit 1; }
 
 prompt() {
@@ -67,6 +71,288 @@ prompt() {
     read -r value
     printf "%s" "$value"
   fi
+}
+
+secret_prompt() {
+  local value
+  printf "%s: " "$1" >&2
+  read -r -s value
+  printf "\n" >&2
+  printf "%s" "${value:-${2:-}}"
+}
+
+validate_install_dir() {
+  [[ "$INSTALL_DIR" =~ ^/[a-zA-Z0-9_./-]+$ && "$INSTALL_DIR" != / && "$INSTALL_DIR" != *'/../'* ]] || die "Use an absolute installation path without spaces or shell characters."
+}
+
+validate_domain() {
+  local label
+  [[ ${#1} -le 253 && "$1" == *.* && "$1" != *..* ]] || die "Enter a DNS hostname, for example gateway.example.com."
+  local -a labels
+  IFS=. read -r -a labels <<< "$1"
+  for label in "${labels[@]}"; do
+    [[ ${#label} -le 63 && "$label" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || die "Invalid DNS hostname."
+  done
+  [[ "$1" != *. ]] || die "Remove the trailing dot from the hostname."
+}
+
+validate_wallet_address() {
+  [[ "$1" =~ ^[1-9A-HJ-NP-Za-km-z]{32,44}$ ]] || die "Enter a Solana public wallet address (base58)."
+}
+
+# Read a value as data; never source .env as shell code.
+read_env_value() {
+  python3 - "$INSTALL_DIR/.env" "$1" <<'PY'
+import re, sys
+value = ''
+for line in open(sys.argv[1], encoding='utf-8'):
+    match = re.match(r'^\s*(?:export\s+)?' + re.escape(sys.argv[2]) + r'\s*=(.*)$', line)
+    if match:
+        value = match[1].strip()
+        quoted = re.match(r'''^(['"])((?:\\.|(?!\1).)*)\1\s*(?:#.*)?$''', value)
+        if quoted:
+            value = quoted[2].replace('\\' + quoted[1], quoted[1])
+        else:
+            value = re.split(r'\s+#', value, maxsplit=1)[0].rstrip()
+print(value, end='')
+PY
+}
+
+dotenv_literal() {
+  local value="${1//\'/\\\'}"
+  [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || die "Use a single-line configuration value."
+  printf "'%s'" "$value"
+}
+
+save_installer() {
+  mkdir -p "$INSTALL_DIR/.installer"
+  chmod 700 "$INSTALL_DIR/.installer"
+  # Serialize functions, not /dev/fd: bash <(wget ...) is a non-seekable stream.
+  # Only non-secret constants are stored. Runtime .env is read on each update.
+  local saved
+  saved="$(mktemp "$INSTALL_DIR/.installer/install.XXXXXX")"
+  {
+    printf '#!/usr/bin/env bash\nset -Eeuo pipefail\n'
+    declare -p RED GREEN YELLOW CYAN BOLD NC INSTALL_DIR HELPER_BIN_DIR ARIO_RELEASE ARIO_COMMIT GATEWAY_TEST_TX
+    declare -f log ok warn die require_root validate_install_dir validate_domain read_env_value \
+      save_installer refresh_helpers migrate_env upgrade_gateway validate_key_file \
+      validate_observer_config convert_key_material clone_node write_helpers
+    printf '\nrequire_root\nvalidate_install_dir\n'
+    printf 'case "${1:---upgrade}" in\n  --upgrade) upgrade_gateway ;;\n  --refresh-helpers) refresh_helpers ;;\n  *) die "Use --upgrade or --refresh-helpers." ;;\nesac\n'
+  } > "$saved"
+  chmod 700 "$saved"
+  mv "$saved" "$INSTALL_DIR/.installer/install-gateway.sh"
+}
+
+refresh_helpers() {
+  [[ -f "$INSTALL_DIR/.env" ]] || die "No .env found in $INSTALL_DIR."
+  DOMAIN="$(read_env_value ARNS_ROOT_HOST)"
+  validate_domain "$DOMAIN"
+  save_installer
+  write_helpers
+  ok "Helper commands refreshed. Gateway services and .env were not changed."
+}
+
+migrate_env() {
+  log "Adding missing R85 settings; preserving existing configuration"
+  python3 - "$INSTALL_DIR/.env" <<'PY'
+import datetime, os, pathlib, re, shutil
+import sys
+path = pathlib.Path(sys.argv[1])
+original = path.read_bytes().decode('utf-8')
+values = {}
+for line in original.splitlines():
+    m = re.match(r'^\s*(?:export\s+)?([A-Z0-9_]+)\s*=(.*)$', line)
+    if m:
+        v = m[2].strip()
+        quoted = re.match(r'''^(['"])((?:\\.|(?!\1).)*)\1\s*(?:#.*)?$''', v)
+        if quoted:
+            v = quoted[2].replace('\\' + quoted[1], quoted[1])
+        else:
+            v = re.split(r'\s+#', v, maxsplit=1)[0].rstrip()
+        values[m[1]] = v
+if (values.get('RUN_OBSERVER') or 'true').lower() != 'true':
+    raise SystemExit('RUN_OBSERVER is disabled. Set it to true for this observer-required installer, then rerun.')
+if (values.get('SUBMIT_CONTRACT_INTERACTIONS') or 'true').lower() != 'true':
+    raise SystemExit('SUBMIT_CONTRACT_INTERACTIONS is disabled. Enable it deliberately before continuing.')
+additions = {}
+def add(key, value):
+    if not values.get(key):
+        additions[key] = value
+add('RUN_OBSERVER', 'true')
+add('SUBMIT_CONTRACT_INTERACTIONS', 'true')
+add('REPORT_DATA_SINK', 'turbo')
+for key in ('CORE_LOG_LEVEL', 'OBSERVER_LOG_LEVEL'):
+    if values.get(key):
+        continue
+    level = values.get('LOG_LEVEL') or 'info'
+    if level not in ('error', 'warn', 'info', 'http', 'verbose', 'debug', 'silly'):
+        raise SystemExit('Review LOG_LEVEL before migrating to CORE_LOG_LEVEL/OBSERVER_LOG_LEVEL.')
+    add(key, level)
+if 'ARNS_CACHE_TTL_MS' in values and 'ARNS_CACHE_TTL_SECONDS' not in values:
+    try:
+        ttl = int(values['ARNS_CACHE_TTL_MS'])
+        if ttl < 0 or ttl % 1000:
+            raise ValueError()
+    except ValueError:
+        raise SystemExit('ARNS_CACHE_TTL_MS must be a non-negative whole number of seconds; review it first.')
+    add('ARNS_CACHE_TTL_SECONDS', str(ttl // 1000))
+upload_keys = ('SOLANA_UPLOAD_KEYPAIR_PATH','SOLANA_UPLOAD_PRIVATE_KEY','ARWEAVE_UPLOAD_KEY_FILE','ARWEAVE_UPLOAD_JWK','ETHEREUM_UPLOAD_PRIVATE_KEY_FILE','ETHEREUM_UPLOAD_PRIVATE_KEY')
+if (values.get('REPORT_DATA_SINK') or 'turbo') == 'turbo' and not any(values.get(k) for k in upload_keys):
+    if values.get('OBSERVER_KEYPAIR_PATH') and not values.get('OBSERVER_PRIVATE_KEY'):
+        add('SOLANA_UPLOAD_KEYPAIR_PATH', '${OBSERVER_KEYPAIR_PATH}')
+    elif values.get('OBSERVER_PRIVATE_KEY') and not values.get('OBSERVER_KEYPAIR_PATH'):
+        add('SOLANA_UPLOAD_PRIVATE_KEY', '${OBSERVER_PRIVATE_KEY}')
+if not additions:
+    print('Required R85 settings already present.')
+    raise SystemExit(0)
+os.umask(0o077)
+stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+backup = path.with_name('.env.backup.' + stamp)
+shutil.copyfile(path, backup)
+backup.chmod(0o600)
+tmp = path.with_name('.env.r85.' + stamp)
+tmp.write_bytes((original + '\n# R85 compatibility additions\n' + ''.join(f'{k}={v}\n' for k,v in additions.items())).encode('utf-8'))
+tmp.chmod(0o600)
+os.replace(tmp, path)
+print('Added: ' + ', '.join(additions) + '. Original .env backed up.')
+PY
+}
+
+upgrade_gateway() {
+  [[ -f "$INSTALL_DIR/.env" ]] || die "No installation found. Run without --upgrade for a new gateway."
+  [[ ! -f "$INSTALL_DIR/.installer/setup-pending" ]] || die "Setup is incomplete. Rerun the original installation command to finish DNS/HTTPS setup."
+  command -v python3 >/dev/null || die "Install python3 before updating."
+  docker compose version >/dev/null
+  clone_node
+  migrate_env
+  DOMAIN="$(read_env_value ARNS_ROOT_HOST)"
+  validate_domain "$DOMAIN"
+  validate_observer_config
+  save_installer
+  write_helpers
+  docker compose config --quiet
+  docker compose pull
+  docker compose up -d
+  docker compose ps
+  ok "R85 applied. Existing .env values, keyfiles, databases and TLS configuration retained."
+  echo "Run gateway-check. For an older nginx configuration, see the R85 header-buffer note in the README."
+}
+
+resume_gateway() {
+  log "Finishing the interrupted installation with the existing .env"
+  clone_node
+  DOMAIN="$(read_env_value ARNS_ROOT_HOST)"
+  AR_IO_WALLET="$(read_env_value AR_IO_WALLET)"
+  OBSERVER_WALLET="$(read_env_value OBSERVER_WALLET)"
+  validate_domain "$DOMAIN"
+  validate_wallet_address "$AR_IO_WALLET"
+  validate_wallet_address "$OBSERVER_WALLET"
+  configure_wallet "main/operator" "$AR_IO_WALLET"
+  if [[ "$OBSERVER_WALLET" != "$AR_IO_WALLET" ]]; then
+    configure_wallet "observer" "$OBSERVER_WALLET"
+  fi
+  save_installer
+  start_gateway
+  configure_firewall_ssl_nginx
+  write_helpers
+  rm -f "$INSTALL_DIR/.installer/setup-pending"
+  finish
+}
+
+validate_key_file() {
+  [[ -f "$1" && ! -L "$1" ]] || die "Missing keyfile or unexpected symlink: $1"
+  python3 - "$1" <<'PY' || die "Expected a 64-byte Solana JSON keypair. Import a seed/private key through the fresh installer first."
+import json, sys
+a = json.load(open(sys.argv[1], encoding='utf-8'))
+if not isinstance(a, list) or len(a) != 64 or not all(type(n) is int and 0 <= n <= 255 for n in a):
+    raise SystemExit(1)
+PY
+  convert_key_material - "$2" < "$1" >/dev/null || die "Keyfile does not match the configured public address: $1"
+}
+
+validate_observer_config() {
+  local config values status=0
+  config="$(mktemp)"
+  values="$(mktemp)"
+  chmod 600 "$config" "$values"
+  docker compose config --format json > "$config" || status=$?
+  if [[ "$status" -ne 0 ]]; then
+    rm -f "$config" "$values"
+    die "Compose configuration is invalid. Services were not started."
+  fi
+  # Read the effective configuration, including custom mounts; keep secrets off stdout.
+  python3 - "$config" > "$values" <<'PY' || status=$?
+import json, pathlib, sys
+c = json.load(open(sys.argv[1], encoding='utf-8'))
+o = c['services']['observer']; e = o['environment']
+expected_images = {
+    'core': 'ghcr.io/ar-io/ar-io-core:27b668f978a7a28009097d6df4f19fffe4e3af04',
+    'envoy': 'ghcr.io/ar-io/ar-io-envoy:9a28d6538aca7fb88d96c862062b13a0ed0fce69',
+    'observer': 'ghcr.io/ar-io/ar-io-observer:c5e98ddcf567598358fa73a0852b6be2cbbd42c4',
+}
+for name, expected in expected_images.items():
+    if c['services'][name].get('image') != expected:
+        raise SystemExit(name + ': image override is not the verified R85 image. Review the override first.')
+for key in ('RUN_OBSERVER', 'SUBMIT_CONTRACT_INTERACTIONS'):
+    if str(e.get(key, '')).lower() != 'true':
+        raise SystemExit(key + ' must be true.')
+if e.get('REPORT_DATA_SINK') != 'turbo':
+    raise SystemExit('This installer validates Turbo/Solana report uploads. Existing non-Turbo settings were preserved; configure/verify that custom uploader before starting manually.')
+if any(e.get(k) for k in ('ARWEAVE_UPLOAD_KEY_FILE', 'ARWEAVE_UPLOAD_JWK', 'ETHEREUM_UPLOAD_PRIVATE_KEY_FILE', 'ETHEREUM_UPLOAD_PRIVATE_KEY')):
+    raise SystemExit('Existing alternate-chain upload credentials need a manual configuration review; no keys were replaced.')
+def host_path(p):
+    for v in sorted(o.get('volumes', []), key=lambda v: len(v.get('target', '')), reverse=True):
+        target = v.get('target', '').rstrip('/')
+        if target and (p == target or p.startswith(target + '/')):
+            if v.get('type') != 'bind':
+                raise SystemExit('Keypair is inside a volume that cannot be validated on the host.')
+            base = pathlib.Path(v['source']).resolve()
+            if p == target:
+                return str(base)
+            file = (base / p[len(target)+1:]).resolve()
+            if not file.is_relative_to(base):
+                break
+            return str(file)
+    raise SystemExit('Keypair path is not inside a configured bind mount.')
+result = []
+for role, address in (('SOLANA', 'AR_IO_WALLET'), ('OBSERVER', 'OBSERVER_WALLET'), ('SOLANA_UPLOAD', None)):
+    file, inline = e.get(role + '_KEYPAIR_PATH', ''), e.get(role + '_PRIVATE_KEY', '')
+    if bool(file) == bool(inline):
+        raise SystemExit(role + ': configure exactly one keypair file or private key.')
+    if inline:
+        alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+        n = 0
+        for ch in inline:
+            if ch not in alphabet:
+                raise SystemExit(role + ': inline key must be a base58 64-byte export.')
+            n = n * 58 + alphabet.index(ch)
+        length = (n.bit_length() + 7) // 8 + len(inline) - len(inline.lstrip('1'))
+        if length != 64:
+            raise SystemExit(role + ': inline key must be 64 bytes; import seeds using the installer.')
+    public = c['services']['core']['environment'].get(address, '') if role == 'SOLANA' else e.get(address, '') if address else ''
+    if address and not public:
+        raise SystemExit(address + ' is required.')
+    result += [host_path(file) if file else '', inline, public]
+sys.stdout.write('\0'.join(result) + '\0')
+PY
+  if [[ "$status" -ne 0 ]]; then
+    rm -f "$config" "$values"
+    die "Observer configuration validation failed. Services were not started."
+  fi
+  local -a fields
+  mapfile -d '' -t fields < "$values"
+  rm -f "$config" "$values"
+  local i
+  for i in 0 3 6; do
+    if [[ -n "${fields[i]}" ]]; then
+      validate_key_file "${fields[i]}" "${fields[i+2]}"
+    else
+      printf '%s' "${fields[i+1]}" | convert_key_material - "${fields[i+2]}" >/dev/null || die "Invalid inline Solana key or public address mismatch."
+    fi
+  done
+  unset fields
+  ok "Operator, observer and report upload keys verified."
 }
 
 confirm() {
@@ -107,6 +393,7 @@ normalize_solana_rpc_url() {
 
 validate_solana_rpc_url() {
   local value="$1"
+  [[ "$value" != *[[:space:]\$\'\"\#]* ]] || die "RPC URL contains whitespace or unsupported dotenv characters. URL-encode those characters."
   [[ "$value" =~ ^https?:// ]] || die "Solana RPC URL must start with https:// or http://. Example: https://mainnet.helius-rpc.com/?api-key=YOUR_KEY"
   if [[ "$value" == *"api-mainnet.helius-rpc.com"* || "$value" == *"/v0/transactions"* || "$value" == *"/v0/addresses"* ]]; then
     die "This is a Helius Enhanced API URL, not a Solana RPC URL. Use the RPCs panel URL: https://mainnet.helius-rpc.com/?api-key=YOUR_KEY"
@@ -133,7 +420,7 @@ header() {
 EOF
   echo
   echo "This installer sets up:"
-  echo "  - ar-io-node from main"
+  echo "  - official ar-io-node R85 (fixed release)"
   echo "  - Docker Compose services"
   echo "  - nginx reverse proxy"
   echo "  - wildcard SSL with Certbot DNS challenge"
@@ -149,16 +436,16 @@ collect_config() {
   log "[1/8] Configuration"
 
   DOMAIN="$(normalize_domain "$(prompt "Gateway domain" "$DOMAIN")")"
-  [[ -n "$DOMAIN" ]] || die "Domain cannot be empty."
+  validate_domain "$DOMAIN"
 
   AR_IO_WALLET="$(prompt "Main Solana gateway wallet address" "$AR_IO_WALLET")"
-  [[ -n "$AR_IO_WALLET" ]] || die "AR_IO_WALLET cannot be empty."
+  validate_wallet_address "$AR_IO_WALLET"
 
   if [[ -z "$OBSERVER_WALLET" ]]; then
     OBSERVER_WALLET="$AR_IO_WALLET"
   fi
   OBSERVER_WALLET="$(prompt "Observer Solana wallet address, Enter = same as main wallet" "$OBSERVER_WALLET")"
-  [[ -n "$OBSERVER_WALLET" ]] || die "OBSERVER_WALLET cannot be empty."
+  validate_wallet_address "$OBSERVER_WALLET"
   if [[ "$OBSERVER_WALLET" == "$AR_IO_WALLET" ]]; then
     echo "Observer wallet: same as main Solana gateway wallet."
   else
@@ -172,14 +459,13 @@ collect_config() {
   warn "Public Solana RPC is rate-limited. For reward reliability, use Helius, Triton, QuickNode, or another premium RPC if you have one."
   warn "For Helius, copy the RPC URL from the left RPCs panel: https://mainnet.helius-rpc.com/?api-key=..."
   warn "Do not use Enhanced Solana APIs URLs such as /v0/transactions."
-  SOLANA_RPC_URL="$(prompt "Solana RPC URL, Enter = public mainnet RPC" "$SOLANA_RPC_URL")"
+  SOLANA_RPC_URL="$(secret_prompt "Solana RPC URL (hidden), Enter = keep configured/default RPC" "$SOLANA_RPC_URL")"
   SOLANA_RPC_URL="$(normalize_solana_rpc_url "$SOLANA_RPC_URL")"
   validate_solana_rpc_url "$SOLANA_RPC_URL"
 
-  REPORT_DATA_SINK=""
-  if confirm "Observer report uploads use Turbo Credits by default. Use AR tokens instead" "n"; then
-    REPORT_DATA_SINK="arweave"
-  fi
+  REPORT_DATA_SINK="turbo"
+  echo "Observer reports use Turbo credits on the observer's Solana address."
+  echo "Fund this address with SOL and Turbo credits; registration/staking follows setup."
 
   echo
   warn "The main/operator Solana keypair is required even when epoch cranking is off."
@@ -222,13 +508,13 @@ collect_config() {
     RATE_LIMITER_IP_ALLOWLIST="$(prompt "IP/CIDR allowlist, comma-separated, blank allowed" "")"
     RATE_LIMITER_ARNS_ALLOWLIST="$(prompt "ArNS allowlist, comma-separated, blank allowed" "")"
 
-    if confirm "Enable x402 debug logging / LOG_LEVEL=debug" "n"; then
+    if confirm "Enable core and observer debug logging" "n"; then
       ENABLE_DEBUG_LOGS="true"
     fi
 
-    if confirm "Configure optional Coinbase CDP onramp keys now" "n"; then
+    if confirm "Use optional Coinbase facilitator credentials (overrides the facilitator URL)" "n"; then
       CDP_API_KEY_ID="$(prompt "CDP_API_KEY_ID" "")"
-      X402_CDP_CLIENT_KEY="$(prompt "X_402_CDP_CLIENT_KEY public client key" "")"
+      X402_CDP_CLIENT_KEY="$(prompt "Optional public paywall/onramp client key" "")"
       printf "Paste CDP API secret key (hidden, blank to skip): " >&2
       read -r -s CDP_SECRET_VALUE
       printf "\n" >&2
@@ -239,7 +525,6 @@ collect_config() {
 install_packages() {
   log "[2/8] Installing base packages"
   apt-get update -y
-  DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
   DEBIAN_FRONTEND=noninteractive apt-get install -y \
     curl openssh-server git certbot nginx sqlite3 build-essential \
     ca-certificates gnupg jq ufw lsb-release openssl dnsutils python3
@@ -270,35 +555,40 @@ install_docker() {
 }
 
 clone_node() {
-  log "[4/8] Installing ar-io-node"
+  log "[4/8] Installing official ar-io-node ${ARIO_RELEASE}"
   if [[ -d "$INSTALL_DIR/.git" ]]; then
     cd "$INSTALL_DIR"
-    git checkout main
-    git pull --ff-only origin main
+    local origin
+    origin="$(git remote get-url origin)"
+    [[ "$origin" == "https://github.com/ar-io/ar-io-node" || "$origin" == "https://github.com/ar-io/ar-io-node.git" ]] || die "This directory is not the official ar-io-node checkout."
+    git diff --quiet && git diff --cached --quiet || die "Tracked files have local changes. Preserve/review them before updating; nothing was reset."
+    git fetch origin "refs/tags/${ARIO_RELEASE}"
+    [[ "$(git rev-parse 'FETCH_HEAD^{commit}')" == "$ARIO_COMMIT" ]] || die "R85 commit verification failed."
+    git merge-base --is-ancestor HEAD "$ARIO_COMMIT" || die "This checkout is newer than R85 or diverged. Refusing to downgrade/reset it."
+    git checkout --detach "$ARIO_COMMIT"
   else
+    [[ ! -e "$INSTALL_DIR" ]] || die "Installation directory already exists without an official Git checkout."
     mkdir -p "$(dirname "$INSTALL_DIR")"
-    git clone -b main https://github.com/ar-io/ar-io-node "$INSTALL_DIR"
+    git clone --branch "$ARIO_RELEASE" https://github.com/ar-io/ar-io-node "$INSTALL_DIR"
+    cd "$INSTALL_DIR"
   fi
+  [[ "$(git rev-parse HEAD)" == "$ARIO_COMMIT" ]] || die "Unexpected upstream commit; services were not started."
 }
 
 write_env() {
-  log "[5/8] Writing .env"
+  log "[6/8] Writing .env"
   cd "$INSTALL_DIR"
-  local admin_key
-  local existing_admin_key=""
-  local log_level="info"
-  if [[ -f .env ]]; then
-    existing_admin_key="$(grep -E '^ADMIN_API_KEY=' .env | tail -n1 | cut -d= -f2- || true)"
-    cp .env ".env.backup.$(date +%Y%m%d-%H%M%S)"
-  fi
-  admin_key="${existing_admin_key:-$(openssl rand -hex 32)}"
+  [[ ! -e .env ]] || die ".env already exists. Use --upgrade to preserve existing settings."
+  local admin_key log_level="info"
+  admin_key="$(openssl rand -hex 32)"
   [[ "$ENABLE_DEBUG_LOGS" == "true" ]] && log_level="debug"
 
   umask 077
   cat > .env <<EOF
 # Generated by Vevivo ar.io gateway installer
 NODE_ENV=production
-LOG_LEVEL=${log_level}
+CORE_LOG_LEVEL=${log_level}
+OBSERVER_LOG_LEVEL=${log_level}
 ADMIN_API_KEY=${admin_key}
 
 GRAPHQL_HOST=${GRAPHQL_HOST}
@@ -313,6 +603,9 @@ OBSERVER_WALLET=${OBSERVER_WALLET}
 SOLANA_RPC_URL=${SOLANA_RPC_URL}
 SOLANA_KEYPAIR_PATH=/app/wallets/${AR_IO_WALLET}.json
 OBSERVER_KEYPAIR_PATH=/app/wallets/${OBSERVER_WALLET}.json
+SOLANA_UPLOAD_KEYPAIR_PATH=/app/wallets/${OBSERVER_WALLET}.json
+REPORT_DATA_SINK=turbo
+SUBMIT_CONTRACT_INTERACTIONS=true
 ENABLE_EPOCH_CRANKING=${ENABLE_EPOCH_CRANKING}
 
 ARIO_CORE_PROGRAM_ID=${ARIO_CORE_PROGRAM_ID}
@@ -326,7 +619,7 @@ HTTPSIG_BIND_REQUEST=true
 
 ARNS_RESOLVER_PRIORITY_ORDER=on-demand,gateway
 ARNS_COMPOSITE_RESOLVER_TIMEOUT_MS=3000
-ARNS_CACHE_TTL_MS=3600000
+ARNS_CACHE_TTL_SECONDS=3600
 TRUSTED_GATEWAYS_REQUEST_TIMEOUT_MS=10000
 GRAPHQL_ON_DEMAND_RESOLUTION_ENABLED=true
 GRAPHQL_ON_DEMAND_RESOLUTION_TIMEOUT_MS=5000
@@ -344,10 +637,6 @@ ANS104_DATA_INDEXER_QUEUE_SIZE=500000
 
 RUN_AUTOHEAL=true
 EOF
-
-  if [[ "$REPORT_DATA_SINK" == "arweave" ]]; then
-    printf "REPORT_DATA_SINK=arweave\n" >> .env
-  fi
 
   if [[ "$X402_ENABLED" == "true" ]]; then
     mkdir -p secrets
@@ -376,8 +665,8 @@ X_402_USDC_PER_BYTE_PRICE=${X402_PER_BYTE_PRICE}
 X_402_USDC_DATA_EGRESS_MIN_PRICE=${X402_MIN_PRICE}
 X_402_USDC_DATA_EGRESS_MAX_PRICE=${X402_MAX_PRICE}
 X_402_RATE_LIMIT_CAPACITY_MULTIPLIER=${X402_CAPACITY_MULTIPLIER}
-X_402_APP_NAME=${X402_APP_NAME}
-X_402_APP_LOGO=${X402_APP_LOGO}
+X_402_APP_NAME=$(dotenv_literal "$X402_APP_NAME")
+X_402_APP_LOGO=$(dotenv_literal "$X402_APP_LOGO")
 CHUNK_GET_BASE64_SIZE_BYTES=${CHUNK_GET_BASE64_SIZE_BYTES}
 EOF
 
@@ -543,7 +832,7 @@ def parse_material(text):
         raise ValueError("empty key material")
     if stripped.startswith("["):
         arr = json.loads(stripped)
-        if not isinstance(arr, list) or not all(isinstance(x, int) for x in arr):
+        if not isinstance(arr, list) or not all(type(x) is int for x in arr):
             raise ValueError("JSON keypair must be an array of numbers")
         raw = bytes(arr)
     elif len(stripped.split()) in (12, 15, 18, 21, 24):
@@ -590,8 +879,12 @@ def main():
     address = b58encode(secret[32:])
     if expected_wallet and address != expected_wallet:
         raise SystemExit(
-            f"key belongs to {address}, but OBSERVER_WALLET is {expected_wallet}"
+            f"key belongs to {address}, but the configured wallet is {expected_wallet}"
         )
+    if target == '-':
+        print(address)
+        return
+    os.umask(0o077)
     os.makedirs(os.path.dirname(target), exist_ok=True)
     with open(target, "w", encoding="utf-8") as handle:
         json.dump(list(secret), handle)
@@ -603,10 +896,8 @@ if __name__ == "__main__":
     main()
 PY
 
-  set +e
-  python3 "$converter" "$target" "$expected_wallet"
-  local status=$?
-  set -e
+  local status=0
+  python3 "$converter" "$target" "$expected_wallet" || status=$?
   rm -f "$converter"
   return "$status"
 }
@@ -614,25 +905,22 @@ PY
 try_convert_key_material() {
   local target="$1"
   local expected_wallet="$2"
-  set +e
   convert_key_material "$target" "$expected_wallet"
-  local status=$?
-  set -e
-  return "$status"
 }
 
 configure_wallet() {
   local role_label="$1"
   local wallet_address="$2"
-  log "[6/8] ${role_label} Solana keyfile"
+  log "[5/8] ${role_label} Solana keyfile"
   cd "$INSTALL_DIR"
   mkdir -p wallets
   chmod 700 wallets
   local target="wallets/${wallet_address}.json"
 
   if [[ -f "$target" ]]; then
+    validate_key_file "${INSTALL_DIR}/${target}" "$wallet_address"
     chmod 600 "$target"
-    ok "Existing keyfile found: ${INSTALL_DIR}/${target}"
+    ok "Existing keyfile verified: ${INSTALL_DIR}/${target}"
     return
   fi
 
@@ -645,18 +933,17 @@ configure_wallet() {
   echo "  - Phantom/Solana seed phrase words"
   echo "  - exported Solana private key/base58"
   echo
-  echo "Seed phrase/private key input is visible on purpose so you can catch typos."
+  echo "Key material input is hidden. It is never written to the command history."
   echo "The derived public address must match: ${wallet_address}"
   echo "Use this only on your own secure terminal."
   echo
 
   while true; do
     local key_material
-    key_material="$(prompt "Key material for ${wallet_address}. Blank = multi-line paste, SKIP = add later" "")"
+    key_material="$(secret_prompt "Key material or JSON file path for ${wallet_address}" "")"
 
     if [[ "${key_material,,}" == "skip" ]]; then
-      warn "Skipped keyfile. Gateway can serve traffic, but ${role_label} protocol actions need ${INSTALL_DIR}/${target}."
-      return
+      die "Observer setup requires valid keys. Installation stopped before services start."
     fi
 
     if [[ -n "$key_material" ]]; then
@@ -679,26 +966,19 @@ configure_wallet() {
       fi
 
       confirm "Try the ${role_label} keyfile step again" "y" && continue
-      warn "Skipped keyfile. You can add it later at ${INSTALL_DIR}/${target}."
-      return
+      die "No valid keyfile; services were not started."
     fi
 
-    echo "Paste the complete key material now, then press CTRL+D when finished."
-    echo "Accepted: JSON array, seed phrase words, or exported private key/base58."
-    if try_convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address"; then
-      ok "Keyfile installed: ${INSTALL_DIR}/${target}"
-      return
-    fi
-    warn "That key material did not derive ${wallet_address}, or it was not valid."
-    confirm "Try the ${role_label} keyfile step again" "y" && continue
-    warn "Skipped keyfile. You can add it later at ${INSTALL_DIR}/${target}."
-    return
+    warn "Please paste a single-line export, or enter the path to a JSON file."
+
   done
 }
 
 start_gateway() {
   log "[7/8] Starting gateway"
   cd "$INSTALL_DIR"
+  validate_observer_config
+  docker compose config --quiet
   docker compose pull
   docker compose up -d
 }
@@ -713,13 +993,12 @@ configure_firewall_ssl_nginx() {
   echo
   echo "Certbot will ask you to create DNS TXT records for:"
   echo "  _acme-challenge.${DOMAIN}"
-  echo "Add the value in Namecheap, wait a few minutes, then press Enter in Certbot."
+  echo "Add the value at your DNS provider, wait for it to propagate, then press Enter in Certbot."
   echo
 
   if [[ -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" ]]; then
     ok "Existing Let's Encrypt certificate found for ${DOMAIN}."
   else
-    systemctl stop nginx >/dev/null 2>&1 || true
     certbot certonly \
       --manual \
       --preferred-challenges dns \
@@ -749,6 +1028,10 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
 
     client_max_body_size 250m;
+    # R85 signed/tagged responses can exceed nginx's default header buffer.
+    proxy_buffer_size 32k;
+    proxy_buffers 8 32k;
+    proxy_busy_buffers_size 64k;
     proxy_connect_timeout 75s;
     proxy_send_timeout 300s;
     proxy_read_timeout 300s;
@@ -758,6 +1041,7 @@ server {
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_http_version 1.1;
         proxy_set_header X-AR-IO-Origin \$http_x_ar_io_origin;
         proxy_set_header X-AR-IO-Origin-Node-Release \$http_x_ar_io_origin_node_release;
@@ -768,40 +1052,45 @@ EOF
 
   nginx -t
   systemctl enable nginx >/dev/null 2>&1 || true
-  systemctl restart nginx
+  systemctl reload-or-restart nginx
   ok "nginx configured for https://${DOMAIN}"
 }
 
 write_helpers() {
   log "Creating helper commands"
 
-  cat > /usr/local/bin/gateway-update <<EOF
+  mkdir -p "$HELPER_BIN_DIR"
+  mkdir -p "$INSTALL_DIR/.installer"
+  {
+    printf '#!/usr/bin/env bash\nset -euo pipefail\n'
+    declare -p INSTALL_DIR
+    declare -f read_env_value
+    printf 'read_env_value "$1"\n'
+  } > "$INSTALL_DIR/.installer/read-env.sh"
+  chmod 700 "$INSTALL_DIR/.installer/read-env.sh"
+  cat > ${HELPER_BIN_DIR}/gateway-update <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+export INSTALL_DIR="${INSTALL_DIR}"
+exec bash "${INSTALL_DIR}/.installer/install-gateway.sh" --upgrade
+EOF
+
+  cat > ${HELPER_BIN_DIR}/gateway-restart <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 cd ${INSTALL_DIR}
-git checkout main
-git pull --ff-only origin main
-docker compose pull
 docker compose up -d --force-recreate
 docker compose ps
 EOF
 
-  cat > /usr/local/bin/gateway-restart <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-cd ${INSTALL_DIR}
-docker compose up -d --force-recreate
-docker compose ps
-EOF
-
-  cat > /usr/local/bin/gateway-logs <<EOF
+  cat > ${HELPER_BIN_DIR}/gateway-logs <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 cd ${INSTALL_DIR}
 docker compose logs -f --tail=120 core observer envoy
 EOF
 
-  cat > /usr/local/bin/gateway-status <<EOF
+  cat > ${HELPER_BIN_DIR}/gateway-status <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 cd ${INSTALL_DIR}
@@ -815,64 +1104,67 @@ echo "=== Disk ==="
 df -h ${INSTALL_DIR}
 EOF
 
-  cat > /usr/local/bin/gateway-check <<EOF
+  cat > ${HELPER_BIN_DIR}/gateway-check <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 DOMAIN="${DOMAIN}"
 TX="${GATEWAY_TEST_TX}"
-echo "=== 1984 content test ==="
-CONTENT_TMP="\$(mktemp)"
-ERR_TMP="\$(mktemp)"
-META="\$(curl -sS -L --max-time 45 -o "\${CONTENT_TMP}" -w "%{http_code}|%{content_type}|%{url_effective}" "https://\${DOMAIN}/\${TX}" 2>"\${ERR_TMP}" || true)"
-HTTP_CODE="\${META%%|*}"
-REST="\${META#*|}"
-CONTENT_TYPE="\${REST%%|*}"
-FINAL_URL="\${REST#*|}"
-if LC_ALL=C grep -a -qx "1984" "\${CONTENT_TMP}"; then
-  echo "1984"
+failures=0
+TMP="\$(mktemp -d)"
+trap 'rm -rf -- "\$TMP"' EXIT
+
+echo "=== Public core health ==="
+if curl -fsS --connect-timeout 10 --max-time 30 "https://\${DOMAIN}/ar-io/healthcheck" -o "\$TMP/core.json" && jq -e '.status == "ok"' "\$TMP/core.json" >/dev/null; then
+  echo "Core health: OK"
 else
-  echo "Content test is not ready yet, or returned a redirect/cache response."
-  [[ -n "\${HTTP_CODE}" ]] && echo "HTTP: \${HTTP_CODE}"
-  [[ -n "\${CONTENT_TYPE}" ]] && echo "Content-Type: \${CONTENT_TYPE}"
-  [[ -n "\${FINAL_URL}" ]] && echo "Final URL: \${FINAL_URL}"
-  if [[ -s "\${ERR_TMP}" ]]; then
-    echo "curl:"
-    sed 's/^/  /' "\${ERR_TMP}"
-  fi
-  echo "Try again in a few minutes: curl -L https://\${DOMAIN}/\${TX}"
+  echo "Core health: FAILED or not ready"
+  failures=1
 fi
-rm -f "\${CONTENT_TMP}" "\${ERR_TMP}"
-echo
-echo "=== /ar-io/info ==="
-curl -fsS "https://\${DOMAIN}/ar-io/info" | jq '{release,wallet,programIds}' || true
-echo
-echo "=== observer report ==="
-if ! curl -fsS "https://\${DOMAIN}/ar-io/observer/reports/current" | jq .; then
-  echo "Observer report is not ready yet. This is common right after startup."
-  echo "If this persists, run: gateway-observer-check"
-  echo
-  echo "Observer container:"
-  cd ${INSTALL_DIR}
-  docker compose ps observer || true
-  echo
-  echo "Recent observer key/config errors:"
-  docker compose logs observer --tail=120 2>/dev/null \
-    | grep -Ei 'Operator Solana key is required|SOLANA_KEYPAIR_PATH|OBSERVER_KEYPAIR_PATH|SOLANA_PRIVATE_KEY|OBSERVER_PRIVATE_KEY|wallet|error|warn' \
-    | tail -40 || true
+
+echo "=== Public observer health ==="
+if curl -fsS --connect-timeout 10 --max-time 30 "https://\${DOMAIN}/ar-io/observer/healthcheck" -o "\$TMP/observer.json" && jq -e '(.uptime | type == "number") and (.uptime >= 0) and (.date | type == "string")' "\$TMP/observer.json" >/dev/null; then
+  echo "Observer health: OK (report submission is checked separately)"
+else
+  echo "Observer health: FAILED or not ready"
+  failures=1
 fi
-echo
-echo "=== local docker ==="
-cd ${INSTALL_DIR}
+
+echo "=== 1984 content test ==="
+HTTP="\$(curl -sS --connect-timeout 10 --max-time 45 --max-filesize 1048576 -o "\$TMP/content" -w '%{http_code}' "https://\${DOMAIN}/\${TX}" || true)"
+if [[ "\$HTTP" == 200 && "\$(cat "\$TMP/content" 2>/dev/null)" == 1984 ]]; then
+  echo "Content: OK"
+else
+  echo "Content: FAILED or not ready (HTTP \$HTTP)"
+  failures=1
+fi
+
+echo "=== Gateway identity ==="
+if ! curl -fsS --connect-timeout 10 --max-time 30 "https://\${DOMAIN}/ar-io/info" | jq -e '{release,wallet,programIds}'; then
+  failures=1
+fi
+
+echo "=== Current observer report ==="
+HTTP="\$(curl -sS --connect-timeout 10 --max-time 30 --max-filesize 10485760 -o "\$TMP/report" -w '%{http_code}' "https://\${DOMAIN}/ar-io/observer/reports/current" || true)"
+if [[ "\$HTTP" == 202 ]]; then
+  echo "Report pending. Check registration, balances and prescribed observation cycles; this is not proof of reward eligibility."
+elif [[ "\$HTTP" == 200 ]] && jq -e 'type == "object" and (.message? != "Report pending")' "\$TMP/report" >/dev/null; then
+  echo "Current report available. Verify submission/performance in the gateway portal."
+else
+  echo "Report endpoint: FAILED (HTTP \$HTTP). Run gateway-observer-check."
+  failures=1
+fi
+cd "${INSTALL_DIR}"
 docker compose ps
+exit "\$failures"
 EOF
 
-  cat > /usr/local/bin/gateway-x402-check <<EOF
+  cat > ${HELPER_BIN_DIR}/gateway-x402-check <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 cd ${INSTALL_DIR}
 get_env() {
   local key="\$1"
-  grep -E "^\${key}=" .env 2>/dev/null | tail -n1 | cut -d= -f2- || true
+  bash "${INSTALL_DIR}/.installer/read-env.sh" "\$key"
 }
 echo "=== x402 / rate limiter env ==="
 docker compose exec core env | grep -E "^(ENABLE_RATE_LIMITER|RATE_LIMITER|ENABLE_X_402|X_402)" | sort || true
@@ -889,7 +1181,7 @@ echo "=== payment logs ==="
 docker compose logs core --tail=300 | grep -Ei "x402|payment|rate limit" || true
 EOF
 
-  cat > /usr/local/bin/gateway-enable-x402 <<EOF
+  cat > ${HELPER_BIN_DIR}/gateway-enable-x402 <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 cd ${INSTALL_DIR}
@@ -920,7 +1212,7 @@ confirm() {
 
 get_env() {
   local key="\$1"
-  grep -E "^\${key}=" .env 2>/dev/null | tail -n1 | cut -d= -f2- || true
+  bash "${INSTALL_DIR}/.installer/read-env.sh" "\$key"
 }
 
 is_evm_address() {
@@ -999,9 +1291,9 @@ CDP_API_KEY_ID="\$EXISTING_CDP_API_KEY_ID"
 X402_CDP_CLIENT_KEY="\$EXISTING_X402_CDP_CLIENT_KEY"
 CDP_SECRET_VALUE=""
 
-if confirm "Configure optional Coinbase CDP onramp keys now" "n"; then
+if confirm "Use optional Coinbase facilitator credentials (overrides the facilitator URL)" "n"; then
   CDP_API_KEY_ID="\$(prompt "CDP_API_KEY_ID" "\$EXISTING_CDP_API_KEY_ID")"
-  X402_CDP_CLIENT_KEY="\$(prompt "X_402_CDP_CLIENT_KEY public client key" "\$EXISTING_X402_CDP_CLIENT_KEY")"
+  X402_CDP_CLIENT_KEY="\$(prompt "Optional public paywall/onramp client key" "\$EXISTING_X402_CDP_CLIENT_KEY")"
   printf "Paste CDP API secret key (hidden, blank to keep existing/skip): " >&2
   read -r -s CDP_SECRET_VALUE
   printf "\\n" >&2
@@ -1072,23 +1364,24 @@ echo
 gateway-x402-check || true
 EOF
 
-  cat > /usr/local/bin/gateway-balance <<EOF
+  cat > ${HELPER_BIN_DIR}/gateway-balance <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 cd ${INSTALL_DIR}
 get_env() {
   local key="\$1"
-  grep -E "^\${key}=" .env 2>/dev/null | tail -n1 | cut -d= -f2- || true
+  bash "${INSTALL_DIR}/.installer/read-env.sh" "\$key"
 }
 
 DEFAULT_WALLET="\$(get_env OBSERVER_WALLET)"
 WALLET="\${1:-\${DEFAULT_WALLET}}"
 RPC="\$(get_env SOLANA_RPC_URL)"
 RPC="\${RPC:-https://api.mainnet-beta.solana.com}"
+[[ "\${WALLET}" =~ ^[1-9A-HJ-NP-Za-km-z]{32,44}$ ]] || { echo "A valid Solana public wallet address is required." >&2; exit 1; }
 
 echo "=== Solana balance ==="
 echo "wallet: \${WALLET}"
-echo "rpc: \${RPC%%\\?*}"
+echo "rpc: configured (URL hidden)"
 
 if [[ "\${RPC}" == *"api-mainnet.helius-rpc.com"* || "\${RPC}" == *"/v0/transactions"* || "\${RPC}" == *"/v0/addresses"* ]]; then
   echo "Wrong Helius URL: this is an Enhanced API endpoint, not a Solana JSON-RPC endpoint."
@@ -1101,33 +1394,33 @@ if command -v solana >/dev/null 2>&1; then
   exit 0
 fi
 
-curl -fsS "\${RPC}" \\
+curl -fsS --connect-timeout 10 --max-time 30 "\${RPC}" \\
   -H "content-type: application/json" \\
   -d "{\\"jsonrpc\\":\\"2.0\\",\\"id\\":1,\\"method\\":\\"getBalance\\",\\"params\\":[\\"\${WALLET}\\"]}" \\
-  | jq -r '
+  | jq -er '
       if type != "object" then
-        "balance lookup failed: RPC did not return a Solana JSON-RPC object. Check SOLANA_RPC_URL."
-      elif (.result.value? != null) then
+        error("balance lookup failed: RPC did not return a Solana JSON-RPC object. Check SOLANA_RPC_URL.")
+      elif (.error != null) then
+        error("balance lookup failed: " + (.error.message // "RPC error" | tostring))
+      elif (.result.value? | type == "number") and (.result.value >= 0) then
         "balance: " + ((.result.value / 1000000000) | tostring) + " SOL"
-      elif (.error.message? != null) then
-        "balance lookup failed: " + .error.message
       else
-        "balance lookup failed: unknown RPC response. Check SOLANA_RPC_URL."
+        error("balance lookup failed: unknown RPC response. Check SOLANA_RPC_URL.")
       end
     '
 EOF
 
-  cat > /usr/local/bin/gateway-observer-check <<EOF
+  cat > ${HELPER_BIN_DIR}/gateway-observer-check <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 cd ${INSTALL_DIR}
 get_env() {
   local key="\$1"
-  grep -E "^\${key}=" .env 2>/dev/null | tail -n1 | cut -d= -f2- || true
+  bash "${INSTALL_DIR}/.installer/read-env.sh" "\$key"
 }
 
 echo "=== observer env ==="
-grep -E '^(ENABLE_EPOCH_CRANKING|SOLANA_KEYPAIR_PATH|OBSERVER_KEYPAIR_PATH|AR_IO_WALLET|OBSERVER_WALLET|SOLANA_RPC_URL)' .env \
+grep -E '^(ENABLE_EPOCH_CRANKING|SOLANA_KEYPAIR_PATH|OBSERVER_KEYPAIR_PATH|AR_IO_WALLET|OBSERVER_WALLET|SOLANA_UPLOAD_KEYPAIR_PATH|REPORT_DATA_SINK|SUBMIT_CONTRACT_INTERACTIONS)' .env \
   | sed -E 's#api-key=[^& ]+#api-key=***#' || true
 echo
 
@@ -1140,7 +1433,7 @@ if [[ -n "\${OBSERVER_KEYPAIR_PATH:-}" ]]; then
 fi
 if [[ -n "\${SOLANA_KEYPAIR_PATH:-}" ]]; then
   HOST_SOLANA_KEY="${INSTALL_DIR}\${SOLANA_KEYPAIR_PATH#/app}"
-  [[ -f "\${HOST_SOLANA_KEY}" ]] && echo "cranker key: OK \${HOST_SOLANA_KEY}" || echo "cranker key: MISSING \${HOST_SOLANA_KEY}"
+  [[ -f "\${HOST_SOLANA_KEY}" ]] && echo "operator key: OK \${HOST_SOLANA_KEY}" || echo "operator key: MISSING \${HOST_SOLANA_KEY}"
 fi
 echo
 
@@ -1171,7 +1464,7 @@ if docker compose logs observer --tail=400 2>/dev/null | grep -qEi 'Epoch [0-9]+
 fi
 EOF
 
-  cat > /usr/local/bin/gateway-help <<'EOF'
+  cat > ${HELPER_BIN_DIR}/gateway-help <<'EOF'
 #!/usr/bin/env bash
 cat <<'HELP'
 ar.io Gateway helper commands
@@ -1179,7 +1472,7 @@ ar.io Gateway helper commands
 gateway-check           Run public gateway, /ar-io/info, observer report, and Docker checks
 gateway-status          Show Docker services, resource usage, and disk usage
 gateway-logs            Follow core, observer, and envoy logs
-gateway-update          Pull latest ar-io-node and recreate services
+gateway-update          Apply verified R85; preserve .env, wallets and databases
 gateway-restart         Recreate services without deleting volumes
 gateway-balance         Check observer Solana wallet SOL balance
 gateway-observer-check  Diagnose observer key/env/report/epoch issues
@@ -1197,31 +1490,30 @@ Enable x402 later:
 HELP
 EOF
 
-  cat > /usr/local/bin/gateway-renew-cert <<EOF
+  cat > ${HELPER_BIN_DIR}/gateway-renew-cert <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-systemctl stop nginx || true
 certbot certonly --manual --preferred-challenges dns --agree-tos --register-unsafely-without-email -d ${DOMAIN} -d "*.${DOMAIN}"
 nginx -t
-systemctl restart nginx
+systemctl reload-or-restart nginx
 EOF
 
-  chmod +x /usr/local/bin/gateway-update \
-    /usr/local/bin/gateway-restart \
-    /usr/local/bin/gateway-logs \
-    /usr/local/bin/gateway-status \
-    /usr/local/bin/gateway-check \
-    /usr/local/bin/gateway-x402-check \
-    /usr/local/bin/gateway-enable-x402 \
-    /usr/local/bin/gateway-balance \
-    /usr/local/bin/gateway-observer-check \
-    /usr/local/bin/gateway-help \
-    /usr/local/bin/gateway-renew-cert
+  chmod +x ${HELPER_BIN_DIR}/gateway-update \
+    ${HELPER_BIN_DIR}/gateway-restart \
+    ${HELPER_BIN_DIR}/gateway-logs \
+    ${HELPER_BIN_DIR}/gateway-status \
+    ${HELPER_BIN_DIR}/gateway-check \
+    ${HELPER_BIN_DIR}/gateway-x402-check \
+    ${HELPER_BIN_DIR}/gateway-enable-x402 \
+    ${HELPER_BIN_DIR}/gateway-balance \
+    ${HELPER_BIN_DIR}/gateway-observer-check \
+    ${HELPER_BIN_DIR}/gateway-help \
+    ${HELPER_BIN_DIR}/gateway-renew-cert
 }
 
 finish() {
   echo
-  echo -e "${GREEN}Installation finished.${NC}"
+  echo -e "${GREEN}R85 installation finished. Network registration is a separate step.${NC}"
   echo "Gateway URL: https://${DOMAIN}"
   echo
   echo "Useful commands:"
@@ -1238,7 +1530,10 @@ finish() {
   echo "  gateway-renew-cert"
   echo
   echo "Important:"
-  echo "  This installer did not run platform registration commands."
+  echo "  Register/stake at https://gateways.ar.io and keep the observer funded with SOL."
+  echo "  Report uploads use Turbo credits: https://console.ar.io/topup"
+  echo "  Keep this observer address unique to this gateway. Rewards are not guaranteed."
+  echo "  Wildcard certificates need manual renewal: gateway-renew-cert"
   echo "  Solana mode requires the operator keyfile:"
   echo "  ${INSTALL_DIR}/wallets/${AR_IO_WALLET}.json"
   if [[ "$OBSERVER_WALLET" != "$AR_IO_WALLET" ]]; then
@@ -1246,27 +1541,50 @@ finish() {
     echo "  ${INSTALL_DIR}/wallets/${OBSERVER_WALLET}.json"
   fi
   echo
-  /usr/local/bin/gateway-check || true
+  if ! ${HELPER_BIN_DIR}/gateway-check; then
+    warn "Services were installed, but public checks are not all passing yet. Run gateway-check after startup; inspect gateway-logs if failures persist."
+  fi
 }
 
 main() {
   require_root
+  validate_install_dir
+  case "${1:-}" in
+    --refresh-helpers) refresh_helpers; return ;;
+    --upgrade) upgrade_gateway; return ;;
+    "") ;;
+    *) die "Usage: bash install-gateway.sh [--upgrade|--refresh-helpers]" ;;
+  esac
+  if [[ -f "$INSTALL_DIR/.env" ]]; then
+    if [[ -f "$INSTALL_DIR/.installer/setup-pending" ]]; then
+      resume_gateway
+    else
+      upgrade_gateway
+    fi
+    return
+  fi
   header
   collect_config
   install_packages
   install_docker
   clone_node
-  write_env
   configure_wallet "main/operator" "$AR_IO_WALLET"
   if [[ "$OBSERVER_WALLET" == "$AR_IO_WALLET" ]]; then
     ok "Observer wallet matches main/operator wallet; reusing the same keyfile."
   else
     configure_wallet "observer" "$OBSERVER_WALLET"
   fi
+  mkdir -p "$INSTALL_DIR/.installer"
+  touch "$INSTALL_DIR/.installer/setup-pending"
+  write_env
+  save_installer
   start_gateway
   configure_firewall_ssl_nginx
   write_helpers
+  rm -f "$INSTALL_DIR/.installer/setup-pending"
   finish
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
